@@ -1,10 +1,11 @@
 // Pantalla "Resultados": elegir partidos, generar el archivo para Roots y, solo si lo confirmas, borrarlos de la tablet.
 import { app, borrarPartidos, irA } from '../contexto.js';
 import { construirResultados, nombreArchivoResultados, resultadoDePartido } from '../exportar.js';
-import { estadoDePartido, fechaCorta, horaCorta, hoyISO, ordenarPorFechaHora, textoDeEstado, textoDeSets, tieneSetSinTerminar } from '../resumen.js';
+import { comparacionConRoots, estadoDePartido, fechaCorta, horaCorta, hoyISO, ordenarPorFechaHora, textoDeEstado, textoDeSets, tieneSetSinTerminar } from '../resumen.js';
 import { abrirVentana, confirmar, informar, toast } from './aviso.js';
 import { h, icono } from './dom.js';
 import { entregarArchivo } from './entregar.js';
+import { bloqueComparacion } from './piezas.js';
 
 let seleccion = null; // Set de ids; null = aún sin inicializar
 
@@ -29,9 +30,15 @@ async function exportar(lista) {
   const sin = elegidos.filter(tieneSetSinTerminar);
   if (sin.length) avisos.push(`${sin.map((r) => `${r.equipoLocal} vs ${r.equipoVisitante}`).join(', ')}: tiene un set sin terminar que NO se exporta (solo van los sets guardados).`);
   const conRoots = elegidos.filter((r) => r.setsEnRoots > 0);
-  if (conRoots.length) avisos.push('Roots ya tiene sets de algún partido marcado; al importar te preguntará antes de reemplazarlos.');
-  if (avisos.length) {
-    const ok = await confirmar({ titulo: 'Antes de exportar', texto: avisos.join(' '), si: 'Exportar igual', no: 'Revisar' });
+  if (avisos.length || conRoots.length) {
+    const texto = h(
+      'div',
+      { class: 'ventana-texto' },
+      avisos.map((a) => h('p', { style: { marginBottom: '10px' } }, a)),
+      conRoots.length ? h('p', { style: { marginBottom: '10px' } }, `Roots ya tiene sets ${conRoots.length > 1 ? 'de estos partidos' : 'de este partido'}; al importar te preguntará antes de reemplazarlos. Compara:`) : null,
+      conRoots.map(bloqueComparacion)
+    );
+    const ok = await confirmar({ titulo: 'Antes de exportar', texto, si: 'Exportar igual', no: 'Revisar' });
     if (!ok) return;
   }
 
@@ -71,11 +78,18 @@ export function vistaExportar() {
         { class: 'lista-opciones' },
         lista.map((r) => {
           const marcado = seleccion.has(r.id);
-          const aviso = tieneSetSinTerminar(r) ? 'Set sin terminar: no se exporta' : r.setsEnRoots > 0 ? `Roots ya tiene ${r.setsEnRoots} set${r.setsEnRoots > 1 ? 's' : ''}` : '';
+          const c = comparacionConRoots(r);
+          const aviso = tieneSetSinTerminar(r)
+            ? 'Set sin terminar: no se exporta'
+            : c
+              ? c.detalle
+                ? `Roots tiene ${c.roots.local}-${c.roots.visitante} (${c.roots.texto})${c.iguales === false ? ' · distinto' : c.iguales ? ' · coincide' : ''}`
+                : `Roots ya tiene ${c.cantidadRoots} set${c.cantidadRoots > 1 ? 's' : ''}`
+              : '';
           return h(
             'button',
             {
-              class: 'opcion',
+              class: marcado ? 'opcion marcada' : 'opcion',
               'aria-pressed': String(marcado),
               onclick: () => {
                 if (marcado) seleccion.delete(r.id);
@@ -83,7 +97,7 @@ export function vistaExportar() {
                 app.renderizar();
               },
             },
-            h('span', { class: 'check-grande', 'aria-pressed': String(marcado) }, h('span', { class: 'caja' }, marcado ? icono('ok', { tam: 20, grueso: 3 }) : null)),
+            h('span', { class: 'caja-marca' }, marcado ? icono('ok', { tam: 20, grueso: 3 }) : null),
             h(
               'span',
               { class: 'datos' },

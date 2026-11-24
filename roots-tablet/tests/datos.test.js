@@ -5,7 +5,7 @@ import { leerArchivoRoots, aplicarImportacion, ErrorImportacion, tieneProgreso }
 import { construirResultados, nombreArchivoResultados, resultadoDePartido } from '../js/exportar.js';
 import { crearAlmacen, crearRespaldoMemoria } from '../js/store.js';
 import * as M from '../js/motor.js';
-import { estadoDePartido, textoDeEstado, tieneSetSinTerminar } from '../js/resumen.js';
+import { comparacionConRoots, estadoDePartido, textoDeEstado, tieneSetSinTerminar } from '../js/resumen.js';
 
 const MUESTRA = readFileSync(new URL('./fixtures/muestra-roots.json', import.meta.url), 'utf8');
 const nuevoAlmacen = () => crearAlmacen(crearRespaldoMemoria());
@@ -255,4 +255,76 @@ test('almacén: las escrituras se aplican en orden y un fallo se reporta sin tra
   assert.deepEqual(llamadas, [1, 2, 3]);
   assert.deepEqual(fallos, ['disco lleno']);
   assert.equal((await almacen.uno('partidos', 1)).v, 3);
+});
+
+// ───────────── comparar con lo que ya tiene Roots ─────────────
+
+test('leer: trae el marcador de cada set de Roots (opcional) y descarta lo inválido', () => {
+  const datos = leerArchivoRoots(MUESTRA);
+  assert.deepEqual(datos.partidos.find((p) => p.id === 11).marcadoresRoots, [{ numeroSet: 1, puntosLocal: 25, puntosVisitante: 22 }]);
+  assert.deepEqual(datos.partidos.find((p) => p.id === 10).marcadoresRoots, [], 'un archivo sin setsRoots sigue sirviendo');
+
+  const base = JSON.parse(MUESTRA);
+  base.partidos = base.partidos.map((p) => (p.id === 10 ? { ...p, setsGuardados: 0, setsRoots: [{ numeroSet: 2, puntosLocal: 18, puntosVisitante: 25 }, { puntosLocal: 25, puntosVisitante: 20 }, { numeroSet: 3, puntosLocal: 'x', puntosVisitante: 5 }, null, { puntosLocal: -1, puntosVisitante: 3 }] } : p));
+  const p10 = leerArchivoRoots(JSON.stringify(base)).partidos.find((p) => p.id === 10);
+  assert.deepEqual(p10.marcadoresRoots.map((s) => [s.numeroSet, s.puntosLocal, s.puntosVisitante]), [[1, 18, 25], [2, 25, 20]], 'si falta algún número de set se numeran por orden');
+  assert.equal(p10.setsGuardados, 2, 'si hay marcadores, la cantidad de sets sale de ellos');
+
+  base.partidos = base.partidos.map((p) => (p.id === 10 ? { ...p, setsRoots: [{ numeroSet: 2, puntosLocal: 18, puntosVisitante: 25 }, { numeroSet: 1, puntosLocal: 25, puntosVisitante: 20 }] } : p));
+  const ordenados = leerArchivoRoots(JSON.stringify(base)).partidos.find((p) => p.id === 10);
+  assert.deepEqual(ordenados.marcadoresRoots.map((s) => [s.numeroSet, s.puntosLocal]), [[1, 25], [2, 18]], 'con números, se ordenan por set');
+});
+
+test('comparar: marcador de Roots frente al de la tablet', async () => {
+  const almacen = nuevoAlmacen();
+  await aplicarImportacion(almacen, leerArchivoRoots(MUESTRA));
+  assert.equal(comparacionConRoots(await almacen.uno('partidos', 10)), null, 'Roots no tiene sets de ese partido');
+
+  const p11 = await almacen.uno('partidos', 11);
+  let c = comparacionConRoots(p11);
+  assert.equal(c.roots.texto, '25-22');
+  assert.deepEqual([c.roots.local, c.roots.visitante], [1, 0]);
+  assert.equal(c.hayTablet, false);
+  assert.equal(c.iguales, null);
+
+  M.elegirFormato(p11.est, 'mejor_de_3');
+  M.guardarSet(p11.est, ctxDe([]), 25, 22);
+  c = comparacionConRoots(p11);
+  assert.equal(c.iguales, true);
+  assert.equal(c.tablet.texto, '25-22');
+
+  p11.est.sets[0].puntosLocal = 21;
+  p11.est.sets[0].puntosVisitante = 25;
+  c = comparacionConRoots(p11);
+  assert.equal(c.iguales, false);
+  assert.deepEqual([c.tablet.local, c.tablet.visitante], [0, 1]);
+});
+
+test('comparar: un archivo viejo (solo la cantidad de sets) avisa que no hay detalle', async () => {
+  const base = JSON.parse(MUESTRA);
+  base.partidos = base.partidos.map((p) => (p.id === 11 ? { ...p, setsRoots: undefined } : p));
+  const almacen = nuevoAlmacen();
+  await aplicarImportacion(almacen, leerArchivoRoots(JSON.stringify(base)));
+  const c = comparacionConRoots(await almacen.uno('partidos', 11));
+  assert.equal(c.detalle, false);
+  assert.equal(c.cantidadRoots, 1);
+  assert.equal(c.iguales, null);
+});
+
+test('importar: el marcador de Roots se actualiza aunque el partido ya tenga lo anotado en la tablet', async () => {
+  const almacen = nuevoAlmacen();
+  await aplicarImportacion(almacen, leerArchivoRoots(MUESTRA));
+  const p11 = await almacen.uno('partidos', 11);
+  M.elegirFormato(p11.est, 'mejor_de_3');
+  M.guardarSet(p11.est, ctxDe([]), 25, 20);
+  await almacen.guardar('partidos', p11);
+
+  const nuevo = JSON.parse(MUESTRA);
+  nuevo.idExportacion = 'exp-muestra-0009';
+  nuevo.partidos = nuevo.partidos.map((p) => (p.id === 11 ? { ...p, setsGuardados: 2, setsRoots: [{ numeroSet: 1, puntosLocal: 25, puntosVisitante: 22 }, { numeroSet: 2, puntosLocal: 19, puntosVisitante: 25 }] } : p));
+  const resumen = await aplicarImportacion(almacen, leerArchivoRoots(JSON.stringify(nuevo)));
+  assert.equal(resumen.conservados, 1);
+  const despues = await almacen.uno('partidos', 11);
+  assert.equal(despues.est.sets[0].puntosVisitante, 20, 'lo anotado en la tablet no se toca');
+  assert.equal(comparacionConRoots(despues).roots.texto, '25-22 · 19-25');
 });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { BASE_ID_TABLET, ErrorNuevoPartido, crearPartidoEnTablet, hoyYAhora, nuevoIdTablet, rivalesConocidos } from '../js/nuevoPartido.js';
+import { BASE_ID_TABLET, ErrorNuevoPartido, crearPartidoEnTablet, hoyYAhora, nuevoIdTablet, normalizarNombre, rivalExacto, rivalesConocidos, rivalesExistentes, rivalesParecidos, sugerirRivales } from '../js/nuevoPartido.js';
 import { aplicarImportacion, leerArchivoRoots, tieneProgreso } from '../js/importar.js';
 import { construirResultados } from '../js/exportar.js';
 import { crearAlmacen, crearRespaldoMemoria } from '../js/store.js';
@@ -116,4 +116,56 @@ test('importar de nuevo desde Roots no toca los partidos creados en la tablet', 
   assert.equal(sigue.creadoEnTablet, true);
   assert.equal(sigue.est.actual.puntosLocal, 7);
   assert.equal(sigue.equipoVisitante, 'Tigres');
+});
+
+// ───────────── rivales que ya existen ─────────────
+
+const PARTIDOS_RIVALES = [
+  { torneoId: 1, equipoLocal: 'Roots', equipoVisitante: 'Halcones VC' },
+  { torneoId: 1, equipoLocal: 'Titanes', equipoVisitante: 'Roots' },
+  { torneoId: 2, equipoLocal: 'Roots', equipoVisitante: 'Águilas' },
+  { torneoId: 2, equipoLocal: 'halcones vc', equipoVisitante: 'ROOTS' },
+];
+
+test('normalizar: sin tildes, mayúsculas, signos ni espacios de más', () => {
+  assert.equal(normalizarNombre('  Águilas   F.C. '), 'aguilas f c');
+  assert.equal(normalizarNombre(null), '');
+});
+
+test('rivales existentes: de todos los torneos, sin Roots ni repetidos', () => {
+  const r = rivalesExistentes(PARTIDOS_RIVALES);
+  assert.deepEqual(r.map((x) => x.nombre), ['Águilas', 'Halcones VC', 'Titanes']);
+  assert.deepEqual([...r.find((x) => x.nombre === 'Halcones VC').torneoIds].sort(), [1, 2]);
+});
+
+test('rival exacto: reconoce el mismo equipo escrito distinto y devuelve el nombre ya guardado', () => {
+  assert.equal(rivalExacto('HALCONES vc', PARTIDOS_RIVALES), 'Halcones VC');
+  assert.equal(rivalExacto('aguilas', PARTIDOS_RIVALES), 'Águilas');
+  assert.equal(rivalExacto('Halcones', PARTIDOS_RIVALES), null);
+  assert.equal(rivalExacto('', PARTIDOS_RIVALES), null);
+});
+
+test('rivales parecidos: "Halcones" avisa de "Halcones VC", pero un equipo distinto no', () => {
+  assert.deepEqual(rivalesParecidos('Halcones', PARTIDOS_RIVALES), ['Halcones VC']);
+  assert.deepEqual(rivalesParecidos('Titán', PARTIDOS_RIVALES), ['Titanes'], 'singular y plural');
+  assert.deepEqual(rivalesParecidos('Titane', PARTIDOS_RIVALES), ['Titanes']);
+  assert.deepEqual(rivalesParecidos('Aguila', PARTIDOS_RIVALES), ['Águilas']);
+  assert.deepEqual(rivalesParecidos('Tigres', PARTIDOS_RIVALES), []);
+  assert.deepEqual(rivalesParecidos('Halcones VC', PARTIDOS_RIVALES), [], 'si es igual no es "parecido"');
+});
+
+test('sugerir: sin texto van los del torneo; escribiendo, los de todos los torneos que coinciden', () => {
+  assert.deepEqual(sugerirRivales('', PARTIDOS_RIVALES, 1), ['Halcones VC', 'Titanes']);
+  assert.deepEqual(sugerirRivales('', PARTIDOS_RIVALES, 3), ['Águilas', 'Halcones VC', 'Titanes'], 'torneo sin rivales: se ofrecen todos');
+  assert.deepEqual(sugerirRivales('hal', PARTIDOS_RIVALES, 2), ['Halcones VC']);
+  assert.deepEqual(sugerirRivales('Titanes', PARTIDOS_RIVALES, 2), ['Titanes'], 'aunque sea de otro torneo');
+  assert.deepEqual(sugerirRivales('zzz', PARTIDOS_RIVALES, 1), []);
+  assert.equal(sugerirRivales('', PARTIDOS_RIVALES, 1, 1).length, 1, 'respeta el máximo');
+});
+
+test('crear partido: si el rival ya existe con otra escritura, usa el nombre guardado', () => {
+  const r = crearPartidoEnTablet(datos({ rival: 'halcones vc' }), PARTIDOS_RIVALES, AHORA);
+  assert.equal(r.equipoVisitante, 'Halcones VC');
+  const otro = crearPartidoEnTablet(datos({ rival: 'Halcones', rootsDeLocal: false }), PARTIDOS_RIVALES, AHORA);
+  assert.equal(otro.equipoLocal, 'Halcones', 'un nombre solo parecido se respeta tal cual (la pantalla ya preguntó)');
 });

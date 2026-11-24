@@ -19,6 +19,23 @@ export function textoDeSets(est) {
   return est.sets.map((s) => `${s.puntosLocal}-${s.puntosVisitante}`).join(' · ');
 }
 
+// Lo que Roots ya tiene de un partido frente a lo anotado en la tablet.
+// Devuelve null si Roots no tiene sets de ese partido. `detalle` es false cuando el archivo de Roots
+// solo dijo cuántos sets hay (sin marcadores): en ese caso no se puede comparar punto por punto.
+function ladoDeSets(sets) {
+  const { local, visitante } = contarSetsGanados(sets.map((s) => ({ local: s.puntosLocal, visitante: s.puntosVisitante })));
+  return { sets, local, visitante, texto: sets.map((s) => `${s.puntosLocal}-${s.puntosVisitante}`).join(' · ') };
+}
+
+export function comparacionConRoots(registro) {
+  if (!(registro.setsEnRoots > 0)) return null;
+  const roots = ladoDeSets(registro.marcadoresRoots ?? []);
+  const tablet = ladoDeSets(registro.est.sets.map((s) => ({ puntosLocal: s.puntosLocal, puntosVisitante: s.puntosVisitante })));
+  const detalle = roots.sets.length > 0;
+  const hayTablet = tablet.sets.length > 0;
+  return { cantidadRoots: registro.setsEnRoots, roots, tablet, detalle, hayTablet, iguales: detalle && hayTablet ? roots.texto === tablet.texto : null };
+}
+
 // Línea de estado corta para la tarjeta del partido.
 export function textoDeEstado(registro) {
   const est = registro.est;

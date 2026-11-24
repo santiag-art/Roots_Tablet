@@ -1,9 +1,22 @@
 // "Nuevo partido": para cuando no alcanzaste a exportarlo desde Roots. Todo se elige con toques;
 // solo el rival se puede escribir (y si ya jugaste contra él en ese torneo, basta tocar su nombre).
 import { app, guardarPartido, irA } from '../contexto.js';
-import { ErrorNuevoPartido, MAX_NOMBRE, NOMBRE_EQUIPO_PROPIO, crearPartidoEnTablet, hoyYAhora, rivalesConocidos } from '../nuevoPartido.js';
+import { ErrorNuevoPartido, MAX_NOMBRE, NOMBRE_EQUIPO_PROPIO, crearPartidoEnTablet, hoyYAhora, rivalExacto, rivalesParecidos, sugerirRivales } from '../nuevoPartido.js';
 import { abrirVentana, informar, toast } from './aviso.js';
 import { h, rellenar } from './dom.js';
+
+// "Escribiste X, pero ya existe Y": devuelve el nombre elegido, o null si cierra la ventana sin elegir.
+function preguntarMismoRival(escrito, parecidos) {
+  return new Promise((resolver) => {
+    abrirVentana({
+      titulo: '¿Es el mismo equipo?',
+      contenido: h('p', { class: 'ventana-texto' }, `Escribiste «${escrito}», pero ya hay ${parecidos.length > 1 ? 'equipos parecidos' : 'un equipo parecido'}. Así no se separan los resultados de un mismo rival en dos.`),
+      ancho: 'chica',
+      acciones: [...parecidos.map((n) => ({ texto: `Sí, es ${n}`, tipo: 'primario', valor: n })), { texto: `No, es otro: ${escrito}`, valor: escrito }],
+      alCerrar: (valor) => resolver(valor ?? null),
+    });
+  });
+}
 
 const etiquetaGenero = (t) => (t.genero === 'femenino' ? 'Femenino' : 'Masculino');
 
@@ -34,9 +47,9 @@ export async function abrirNuevoPartido() {
     );
 
   function pintarRivales() {
-    const conocidos = estado.torneoId == null ? [] : rivalesConocidos([...app.partidos.values()], estado.torneoId);
+    const sugeridos = sugerirRivales(estado.rival, [...app.partidos.values()], estado.torneoId);
     const actual = estado.rival.trim().toLowerCase();
-    rellenar(zonaRivales, conocidos.map((n) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(actual === n.toLowerCase()), onclick: () => { estado.rival = n; entradaRival.value = n; pintarRivales(); } }, n)));
+    rellenar(zonaRivales, sugeridos.map((n) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(actual === n.toLowerCase()), onclick: () => { estado.rival = n; entradaRival.value = n; pintarRivales(); } }, n)));
   }
 
   const pintarLado = () =>
@@ -73,7 +86,15 @@ export async function abrirNuevoPartido() {
         onclick: async () => {
           try {
             const torneo = app.torneos.get(estado.torneoId);
-            const registro = crearPartidoEnTablet({ torneo, rival: estado.rival || entradaRival.value, rootsDeLocal: estado.rootsDeLocal, fecha: entradaFecha.value || estado.fecha, hora: entradaHora.value || estado.hora }, [...app.partidos.values()]);
+            let rival = (estado.rival || entradaRival.value).trim();
+            const existentes = [...app.partidos.values()];
+            const parecidos = rivalExacto(rival, existentes) ? [] : rivalesParecidos(rival, existentes);
+            if (parecidos.length) {
+              const elegido = await preguntarMismoRival(rival, parecidos);
+              if (elegido == null) return false; // cerró sin elegir: sigue en el formulario
+              rival = elegido;
+            }
+            const registro = crearPartidoEnTablet({ torneo, rival, rootsDeLocal: estado.rootsDeLocal, fecha: entradaFecha.value || estado.fecha, hora: entradaHora.value || estado.hora }, existentes);
             await guardarPartido(registro);
             toast('Partido creado.', 'ok');
             irA(`#/partido/${registro.id}`);

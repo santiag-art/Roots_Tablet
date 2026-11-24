@@ -28,7 +28,8 @@ test('el resumen toma marcador, rival y mejores jugadoras como Roots', () => {
   assert.equal(d.rival, 'Rivales');
   assert.equal(d.gano, true);
   assert.deepEqual([d.setsRoots, d.setsRival], [1, 0]);
-  assert.deepEqual(d.sets, [{ roots: 25, rival: 20 }]);
+  assert.deepEqual(d.sets, [{ roots: 25, rival: 20, tmRoots: 0, tmRival: 0 }]);
+  assert.equal(d.hayTiemposMuertos, false); // nadie pidió tiempo muerto: no se muestra
   assert.equal(d.subtitulo, 'Femenino · Menores');
   assert.equal(d.tituloDestacadas, 'Mejores jugadoras');
   assert.deepEqual(d.destacadas.map((x) => x.nombre), ['Bea Punta']);
@@ -42,7 +43,7 @@ test('si Roots es el visitante, los puntos se leen del lado correcto', () => {
   const d = datosDeRegistro({ registro, torneo: TORNEO, jugadores: JUGADORAS });
   assert.equal(d.equipo, 'Rivales');
   assert.equal(d.rival, 'Roots');
-  assert.deepEqual(d.sets, [{ roots: 20, rival: 25 }]);
+  assert.deepEqual(d.sets, [{ roots: 20, rival: 25, tmRoots: 0, tmRival: 0 }]);
   assert.equal(d.gano, false);
 });
 
@@ -86,4 +87,19 @@ test('dibujarResumen corre completo con un lienzo de mentira', () => {
   const lienzo = dibujarResumen(d, null, crear);
   assert.equal(lienzo.width, 1080);
   assert.ok(lienzo.height > 600 && lienzo.height < 2600);
+});
+
+test('los tiempos muertos pedidos salen en el resumen, del lado de Roots', () => {
+  const { registro, est } = partidoJugado({ ladoPropio: 'visitante' });
+  est.sets[0].tiemposMuertos = { local: 2, visitante: 1 }; // Roots es visitante: pidió 1, el rival pidió 2
+  const d = datosDeRegistro({ registro, torneo: TORNEO, jugadores: JUGADORAS });
+  assert.equal(d.hayTiemposMuertos, true);
+  assert.deepEqual([d.tiemposRoots, d.tiemposRival], [1, 2]);
+  assert.deepEqual([d.sets[0].tmRoots, d.sets[0].tmRival], [1, 2]);
+  const crear = (w, h) => ({
+    width: w,
+    height: h,
+    getContext: () => new Proxy({ measureText: (t) => ({ width: String(t).length * 10 }) }, { get: (o, k) => (k in o ? o[k] : () => {}), set: () => true }),
+  });
+  assert.equal(dibujarResumen(d, null, crear).width, 1080);
 });

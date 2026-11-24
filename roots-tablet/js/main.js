@@ -8,6 +8,7 @@ import { toast } from './ui/aviso.js';
 import { vaciar, h } from './ui/dom.js';
 import { vistaExportar } from './ui/exportarPantalla.js';
 import { vistaInicio } from './ui/inicio.js';
+import { vistaRival, vistaRivales } from './ui/rivales.js';
 import { vistaPartido } from './ui/partido.js';
 
 const raiz = document.getElementById('app');
@@ -18,6 +19,15 @@ function rutaActual() {
   const m = /^#\/partido\/(\d+)$/.exec(location.hash);
   if (m) return { nombre: 'partido', id: Number(m[1]) };
   if (location.hash === '#/exportar') return { nombre: 'exportar' };
+  if (location.hash === '#/rivales') return { nombre: 'rivales' };
+  const r = /^#\/rival\/(.+)$/.exec(location.hash);
+  if (r) {
+    try {
+      return { nombre: 'rival', id: decodeURIComponent(r[1]) };
+    } catch {
+      return { nombre: 'rivales' };
+    }
+  }
   return { nombre: 'inicio' };
 }
 
@@ -45,7 +55,7 @@ function renderizar() {
   rutaAnterior = clave;
   let vista;
   try {
-    vista = ruta.nombre === 'partido' ? vistaPartido(ruta.id) : ruta.nombre === 'exportar' ? vistaExportar() : vistaInicio();
+    vista = ruta.nombre === 'partido' ? vistaPartido(ruta.id) : ruta.nombre === 'exportar' ? vistaExportar() : ruta.nombre === 'rivales' ? vistaRivales() : ruta.nombre === 'rival' ? vistaRival(ruta.id) : vistaInicio();
   } catch (err) {
     console.error(err);
     vista = h('div', { class: 'vacio' }, h('h2', {}, 'Algo falló al dibujar la pantalla'), h('p', { class: 'nota' }, String(err?.message ?? err)), h('button', { class: 'btn btn-primario', onclick: () => { location.hash = '#/'; location.reload(); } }, 'Volver al inicio'));
@@ -64,18 +74,38 @@ function medirCabecera() {
   document.documentElement.style.setProperty('--alto-cabecera', `${alto}px`);
 }
 
-async function actualizarBloqueoPantalla(ruta) {
+// Pantalla encendida mientras hay un partido abierto. Se pide y se suelta de a una vez: cada punto vuelve a dibujar la
+// pantalla, y si se pidiera otro bloqueo mientras el anterior aún llega, quedarían bloqueos sueltos que nadie libera.
+let quiereBloqueo = false;
+let sincronizandoBloqueo = false;
+
+async function sincronizarBloqueo() {
+  if (sincronizandoBloqueo || !navigator.wakeLock) return;
+  sincronizandoBloqueo = true;
   try {
-    if (ruta.nombre === 'partido' && !bloqueoPantalla && navigator.wakeLock) {
-      bloqueoPantalla = await navigator.wakeLock.request('screen');
-      bloqueoPantalla.addEventListener('release', () => { bloqueoPantalla = null; });
-    } else if (ruta.nombre !== 'partido' && bloqueoPantalla) {
-      await bloqueoPantalla.release();
-      bloqueoPantalla = null;
-    }
+    let quiere;
+    do {
+      quiere = quiereBloqueo;
+      if (quiere && !bloqueoPantalla) {
+        const bloqueo = await navigator.wakeLock.request('screen');
+        bloqueo.addEventListener('release', () => { if (bloqueoPantalla === bloqueo) bloqueoPantalla = null; });
+        bloqueoPantalla = bloqueo;
+      } else if (!quiere && bloqueoPantalla) {
+        const bloqueo = bloqueoPantalla;
+        bloqueoPantalla = null;
+        await bloqueo.release();
+      }
+    } while (quiere !== quiereBloqueo); // si cambió la pantalla mientras esperaba, repite
   } catch {
-    bloqueoPantalla = null;
+    bloqueoPantalla = null; // sin permiso o sin batería: se reintenta en el próximo dibujo
+  } finally {
+    sincronizandoBloqueo = false;
   }
+}
+
+function actualizarBloqueoPantalla(ruta) {
+  quiereBloqueo = ruta.nombre === 'partido';
+  return sincronizarBloqueo();
 }
 
 function registrarServiceWorker() {

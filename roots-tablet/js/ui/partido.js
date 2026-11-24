@@ -2,7 +2,7 @@
 import { app, guardarPartido, irA, jugadoresDeTorneo } from '../contexto.js';
 import {
   ErrorRegla, derivados, elegirFormato, elegirLadoPropio, elegirSaque, estaTerminado, guardarSet, marcarCambioCanchaHecho, nombresAmbiguos, partidoDecidido,
-  pedirTiempoMuerto, corregirTiempoMuerto, corregirMarcadorSet, reabrirUltimoSet, cierreExactoDelSet, reabrirPartido, restarPunto, sumarPunto, terminarPartido, deshacerUltimaAccion, TIEMPOS_POR_SET,
+  pedirTiempoMuerto, corregirTiempoMuerto, corregirMarcadorSet, reabrirUltimoSet, cierreExactoDelSet, reabrirPartido, restarPunto, sumarPunto, terminarPartido, deshacerUltimaAccion, entrarLibero, MAX_SUSTITUCIONES, TIEMPOS_POR_SET,
 } from '../motor.js';
 import { errorMarcadorSet, errorOrdenSet } from '../reglas/reglasSet.js';
 import { aplicarTema, temaActual } from './ajustes.js';
@@ -11,11 +11,16 @@ import { h, icono, rellenar } from './dom.js';
 import { vistaAcciones, reiniciarSeleccion } from './acciones.js';
 import { indicadorGuardado, exportarBorradorAhora } from './borradorPantalla.js';
 import { tieneSetEnJuego } from '../borrador.js';
+import { alertasEnVivo } from '../rachas.js';
+import { avisosActivados, bajoElLimite, cambiosDelSet, guardarAvisosActivados, liberoPuedeEntrar, liberosQueSaldran } from '../avisosJuego.js';
+import { guardarPreferenciasMarcador, leerPreferenciasMarcador, marcadorInvertido } from '../marcadorLados.js';
+import { detalleRivalActivado, guardarDetalleRivalActivado } from '../puntosRival.js';
+import { preguntarPuntoRival } from './puntoRival.js';
 import { vistaPlantilla } from './plantilla.js';
 import { vistaResumen } from './resumenPartido.js';
 import { iniciarTiempoMuerto } from './tiempoMuerto.js';
 
-let estadoVista = { partidoId: null, tab: 'plantilla', avisos: [] };
+let estadoVista = { partidoId: null, tab: 'plantilla', avisos: [], destellos: [], descartadas: new Set() };
 
 function ctxDe(reg, jugadores) {
   return {
@@ -33,7 +38,7 @@ export function vistaPartido(partidoId) {
     return h('div', {});
   }
   if (estadoVista.partidoId !== partidoId) {
-    estadoVista = { partidoId, tab: reg.est.actual.plantillaConfirmada ? 'acciones' : 'plantilla', avisos: [] };
+    estadoVista = { partidoId, tab: estaTerminado(reg.est) ? 'resumen' : reg.est.actual.plantillaConfirmada ? 'acciones' : 'plantilla', avisos: [], destellos: [], descartadas: new Set() };
     reiniciarSeleccion();
   }
   const est = reg.est;
@@ -67,6 +72,7 @@ export function vistaPartido(partidoId) {
     },
   };
 
+  detectarDestellos(V);
   return h(
     'div',
     { class: 'partido' },
@@ -74,6 +80,44 @@ export function vistaPartido(partidoId) {
     h('div', { class: 'avisos' }, avisos(V)),
     h('div', { class: 'cuerpo' }, est.formatoSets ? (estadoVista.tab === 'plantilla' ? vistaPlantilla(V) : estadoVista.tab === 'resumen' ? vistaResumen(V) : vistaAcciones(V)) : elegirFormatoVista(V))
   );
+}
+
+// ─────────────── Destellos (avisos que aparecen un momento) ───────────────
+function destello(texto) {
+  estadoVista.destellos.push({ texto, hasta: Date.now() + 6000 });
+  setTimeout(() => {
+    if (location.hash.startsWith('#/partido/')) app.renderizar();
+  }, 6100);
+}
+
+// Compara con el dibujo anterior: avisa cuando bajan los cambios a 2, 1 o 0 y cuando el equipo rota (quién saca ahora).
+function detectarDestellos(V) {
+  const { est, d } = V;
+  const act = est.actual;
+  const restantes = cambiosDelSet({ usados: d.sustitucionesUsadas, maximo: MAX_SUSTITUCIONES });
+  const antes = estadoVista.previo;
+  if (antes && antes.sets === est.sets.length && act.plantillaConfirmada && avisosActivados()) {
+    if (bajoElLimite(antes.restantes, restantes.restantes)) destello(restantes.aviso);
+    const pasos = (((act.rotaciones - antes.rotaciones) % 6) + 6) % 6;
+    const saca = act.slots[0];
+    if (pasos === 1 && saca != null && act.slots.filter((id) => id != null).length === 6) {
+      const j = d.jugadoresPorId.get(saca);
+      destello(`Rotación: ahora saca ${j ? `${j.numero != null ? `#${j.numero} ` : ''}${j.nombre.split(' ')[0]}` : 'la jugadora de P1'}.`);
+    }
+  }
+  estadoVista.previo = { sets: est.sets.length, rotaciones: act.rotaciones, restantes: restantes.restantes };
+}
+
+// Suma el punto y, si fue del rival, pregunta cómo anotó (se puede omitir o apagar desde el menú ⋮).
+function sumarAlMarcador(V, lado) {
+  const anotado = V.aplicar((e, c) => sumarPunto(e, c, lado, V.nombres));
+  if (anotado && lado !== V.est.ladoPropio && detalleRivalActivado()) preguntarPuntoRival(V);
+}
+
+// Pide el tiempo muerto de un equipo y arranca la cuenta regresiva (igual desde el chip TM o desde una alerta).
+function pedirTM(V, lado) {
+  const nombre = V.nombres[lado];
+  if (V.aplicar((e) => pedirTiempoMuerto(e, lado))) iniciarTiempoMuerto({ equipo: nombre, onDevolver: () => V.aplicar((e) => corregirTiempoMuerto(e, lado)) });
 }
 
 // ─────────────── Formato ───────────────
@@ -87,8 +131,15 @@ function barra(V) {
   const { reg, est, d } = V;
   const act = est.actual;
   const ultima = act.historial.at(-1);
+  const invertido = marcadorInvertido(leerPreferenciasMarcador(), { setsGuardados: est.sets.length, cambioCanchaHecho: act.cambioCanchaHecho, esSetDecisivo: d.esSetDecisivo });
+  if (estadoVista.invertido !== undefined && estadoVista.invertido !== invertido) toast('El marcador cambió de lado, igual que los equipos en la cancha.', 'info');
+  estadoVista.invertido = invertido;
   const tab = (id, texto) => h('button', { role: 'tab', 'aria-selected': String(estadoVista.tab === id), onclick: () => { estadoVista.tab = id; app.renderizar(); } }, texto);
 
+  const chipCambios = (derivs) => {
+    const c = cambiosDelSet({ usados: derivs.sustitucionesUsadas, maximo: MAX_SUSTITUCIONES });
+    return h('span', { class: `chip-cambios ${c.nivel}`, title: 'Sustituciones de este set (el líbero no cuenta)' }, `${c.restantes} ${c.restantes === 1 ? 'cambio' : 'cambios'}`);
+  };
   const equipo = (lado) => {
     const nombre = V.nombres[lado];
     const usados = act.tiemposMuertos[lado];
@@ -99,6 +150,7 @@ function barra(V) {
       h(
         'div',
         { class: 'eq-chips' },
+        est.ladoPropio === lado && act.plantillaConfirmada && est.formatoSets && avisosActivados() ? chipCambios(d) : null,
         h('button', { class: `chip-saque ${act.saca === lado ? 'activo' : ''} ${act.saca == null ? 'pide' : ''}`, disabled: V.bloqueado, 'aria-pressed': String(act.saca === lado), onclick: () => V.aplicar((e) => elegirSaque(e, lado)) }, act.saca === lado ? 'Saca' : 'Sacar'),
         h(
           'button',
@@ -106,11 +158,7 @@ function barra(V) {
             class: 'chip-tm',
             disabled: V.bloqueado || usados >= TIEMPOS_POR_SET,
             'aria-label': `Tiempo muerto de ${nombre}, usados ${usados} de ${TIEMPOS_POR_SET}`,
-            onclick: () => {
-              if (V.aplicar((e) => pedirTiempoMuerto(e, lado))) {
-                iniciarTiempoMuerto({ equipo: nombre, onDevolver: () => V.aplicar((e) => corregirTiempoMuerto(e, lado)) });
-              }
-            },
+            onclick: () => pedirTM(V, lado),
           },
           'TM',
           h('span', { class: 'puntos-tm' }, Array.from({ length: TIEMPOS_POR_SET }, (_, i) => h('span', { class: `punto-tm ${i < usados ? 'usado' : ''}` })))
@@ -125,7 +173,7 @@ function barra(V) {
       { class: `puntos puntos-${lado === 'local' ? 'l' : 'v'}` },
       h('button', { class: 'btn-punto', 'aria-label': `Quitar punto a ${V.nombres[lado]}`, disabled: V.bloqueado || n === 0, onclick: () => V.aplicar((e, c) => restarPunto(e, c, lado, V.nombres)) }, icono('menos')),
       h('div', { class: 'marcador-num', 'aria-live': 'polite' }, n),
-      h('button', { class: 'btn-punto mas', 'aria-label': `Punto para ${V.nombres[lado]}`, disabled: V.bloqueado, onclick: () => V.aplicar((e, c) => sumarPunto(e, c, lado, V.nombres)) }, icono('mas', { tam: 30, grueso: 3 }))
+      h('button', { class: 'btn-punto mas', 'aria-label': `Punto para ${V.nombres[lado]}`, disabled: V.bloqueado, onclick: () => sumarAlMarcador(V, lado) }, icono('mas', { tam: 30, grueso: 3 }))
     );
   };
 
@@ -143,7 +191,7 @@ function barra(V) {
     ),
     h(
       'div',
-      { class: 'barra-marcador' },
+      { class: `barra-marcador${invertido ? ' invertida' : ''}` },
       equipo('local'),
       puntos('local'),
       h('div', { class: 'centro-marcador' }, h('div', { class: 'set-n' }, V.bloqueado ? 'Terminado' : `Set ${d.numeroSetActual}`), h('div', { class: 'sets-g' }, `${d.setsLocal} - ${d.setsVisitante}`), h('div', { class: 'formato' }, est.formatoSets === 'mejor_de_5' ? 'Mejor de 5' : est.formatoSets === 'mejor_de_3' ? 'Mejor de 3' : '')),
@@ -175,6 +223,41 @@ function avisos(V) {
   if (est.formatoSets && !errorMarcadorSet({ numeroSet: d.numeroSetActual, totalSets: d.totalSets, puntosLocal: act.puntosLocal, puntosVisitante: act.puntosVisitante })) {
     lista.push(aviso('aviso-ok', [h('strong', {}, `Marcador de set completo (${act.puntosLocal}-${act.puntosVisitante}). `), '¿Guardas el set?'], h('button', { class: 'btn btn-primario', onclick: () => abrirTerminarSet(V) }, 'Terminar set')));
   }
+  if (act.plantillaConfirmada && est.formatoSets && avisosActivados()) {
+    const nombre = (id) => d.nombre(id).split(' ')[0];
+    for (const x of liberosQueSaldran({ slots: act.slots, idsLibero: d.idsLibero, reemplazados: d.reemplazados, sacamos: d.sacamos })) {
+      lista.push(aviso('aviso-destello', [h('strong', {}, 'La líbero sale: '), `${nombre(x.liberoId)} está en P${x.posicion}; si ganan este saque y rotan, sale y vuelve ${nombre(x.vuelveId)}.`]));
+    }
+    const ultLib = act.sustituciones.filter((x) => x.porLibero || x.nuevoLibero).at(-1);
+    const entra = liberoPuedeEntrar({ slots: act.slots, idsLibero: d.idsLibero, jugadoresPorId: d.jugadoresEnPartido, sacamos: d.sacamos, ultimoCambio: ultLib?.porLibero ? ultLib : null, puntosLocal: act.puntosLocal, puntosVisitante: act.puntosVisitante });
+    if (entra) {
+      lista.push(aviso('aviso-destello', [h('strong', {}, 'Puede entrar la líbero: '), `${nombre(entra.liberoId)} por ${nombre(entra.saleId)} (central en P${entra.posicion}).`], h('button', { class: 'btn btn-primario', onclick: () => V.aplicar((e, c) => entrarLibero(e, c, entra.liberoId, entra.saleId)) }, 'Entrar')));
+    }
+  }
+  if (act.plantillaConfirmada && est.formatoSets && avisosActivados()) {
+    const propio = est.ladoPropio;
+    const enCancha = [...d.enCancha];
+    const alertas = alertasEnVivo({ puntosSeq: act.puntosSeq, eventos: act.eventos, ladoPropio: propio, nombres: V.nombres, enCancha, tmDisponibles: Math.max(0, TIEMPOS_POR_SET - act.tiemposMuertos[propio]), nombreDe: (id) => d.nombre(id).split(' ')[0] });
+    for (const a of alertas) {
+      const clave = `${d.numeroSetActual}|${a.clave}`;
+      if (estadoVista.descartadas.has(clave)) continue;
+      const descartar = () => { estadoVista.descartadas.add(clave); app.renderizar(); };
+      lista.push(
+        aviso(
+          `aviso-alerta alerta-${a.nivel}`,
+          [h('strong', {}, a.tipo === 'racha-rival' ? 'Racha del rival: ' : 'Errores seguidos: '), a.texto],
+          h(
+            'div',
+            { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+            a.sugiereTiempoMuerto ? h('button', { class: 'btn btn-primario', onclick: () => { descartar(); pedirTM(V, propio); } }, 'Pedir tiempo muerto') : null,
+            h('button', { class: 'btn-icono', 'aria-label': 'Cerrar alerta', onclick: descartar }, icono('cerrar', { tam: 18 }))
+          )
+        )
+      );
+    }
+  }
+  estadoVista.destellos = estadoVista.destellos.filter((x) => x.hasta > Date.now());
+  if (avisosActivados()) estadoVista.destellos.forEach((x) => lista.push(aviso('aviso-destello', x.texto)));
   estadoVista.avisos.forEach((a, i) => lista.push(aviso('aviso-info', a.texto, h('button', { class: 'btn-icono', 'aria-label': 'Cerrar aviso', onclick: () => { estadoVista.avisos.splice(i, 1); app.renderizar(); } }, icono('cerrar', { tam: 18 })))));
   return lista;
 }
@@ -292,6 +375,7 @@ async function abrirTerminarPartido(V) {
   if (!ok) return;
   terminarPartido(est);
   guardarPartido(reg);
+  estadoVista.tab = 'resumen'; // lo primero que se mira al terminar: cómo anotó el rival y el mapa de calor
   app.renderizar();
 }
 
@@ -311,6 +395,12 @@ function abrirMenu(V) {
     if (est.sets.length === 0) filas.push(opcion('documento', 'Formato del partido', est.formatoSets === 'mejor_de_5' ? 'Mejor de 5' : est.formatoSets === 'mejor_de_3' ? 'Mejor de 3' : 'Sin elegir', () => abrirFormato(V)));
   }
   if (est.sets.length > 0 || tieneSetEnJuego(reg)) filas.push(opcion('bajar', 'Exportar borrador', 'Todo lo anotado, también el set en juego', () => exportarBorradorAhora([reg.id])));
+  const prefs = leerPreferenciasMarcador();
+  const cambiarPrefs = (cambio) => { guardarPreferenciasMarcador({ ...prefs, ...cambio }); app.renderizar(); };
+  filas.push(opcion('rotar', 'Invertir el marcador', prefs.invertido ? 'Ahora: invertido (para zurdas)' : 'Ahora: normal. Pone cada equipo del otro lado', () => cambiarPrefs({ invertido: !prefs.invertido })));
+  filas.push(opcion('rotar', 'Marcador sigue el cambio de cancha', prefs.sigue ? 'Activado: cambia de lado entre sets y a los 8 puntos del set decisivo' : 'Apagado', () => cambiarPrefs({ sigue: !prefs.sigue })));
+  filas.push(opcion('lista', 'Avisos del partido', avisosActivados() ? 'Activados: cambios que quedan, rotación, líbero y rachas' : 'Apagados', () => { guardarAvisosActivados(!avisosActivados()); app.renderizar(); }));
+  filas.push(opcion('lista', 'Detalle de los puntos del rival', detalleRivalActivado() ? 'Activado: al sumarle un punto al rival preguntas cómo anotó (ataque con zonas, saque, bloqueo o error)' : 'Apagado', () => { guardarDetalleRivalActivado(!detalleRivalActivado()); app.renderizar(); }));
   filas.push(opcion(temaActual() === 'claro' ? 'luna' : 'sol', temaActual() === 'claro' ? 'Tema oscuro' : 'Tema claro', '', () => { aplicarTema(temaActual() === 'claro' ? 'oscuro' : 'claro'); app.renderizar(); }));
   filas.push(opcion('atras', 'Volver a la lista', 'Lo anotado ya está guardado', () => irA('#/')));
   const v = abrirVentana({ titulo: 'Menú del partido', contenido: h('div', { class: 'lista-opciones' }, filas), ancho: 'chica' });

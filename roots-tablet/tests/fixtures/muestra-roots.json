@@ -50,7 +50,10 @@
       "fecha": "2026-11-23",
       "hora": "10:30:00",
       "formatoSets": "mejor_de_3",
-      "setsGuardados": 1
+      "setsGuardados": 1,
+      "setsRoots": [
+        { "numeroSet": 1, "puntosLocal": 25, "puntosVisitante": 22 }
+      ]
     }
   ],
   "jugadores": [

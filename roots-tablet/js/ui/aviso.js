@@ -102,7 +102,7 @@ export function confirmar({ titulo, texto, si = 'Sí', no = 'Cancelar', peligro 
   return new Promise((resolver) => {
     abrirVentana({
       titulo,
-      contenido: h('p', { class: 'ventana-texto' }, texto),
+      contenido: typeof texto === 'string' ? h('p', { class: 'ventana-texto' }, texto) : texto,
       ancho: 'chica',
       acciones: [
         { texto: no, onclick: () => resolver(false) },

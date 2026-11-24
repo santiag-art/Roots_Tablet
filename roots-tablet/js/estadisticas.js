@@ -30,9 +30,10 @@ function idsLiberos(est) {
   return new Set(filas.filter((t) => t.esLibero).map((t) => t.jugadorId));
 }
 
-export function grupoDeJugadora(jugador, esLibero) {
+// `posicionEnPartido`: la que eligió para ese partido (si no hay, vale la de su ficha).
+export function grupoDeJugadora(jugador, esLibero, posicionEnPartido = null) {
   if (esLibero) return 'libero';
-  return clavePosicion(jugador?.posicion) ?? 'otros';
+  return clavePosicion(posicionEnPartido ?? jugador?.posicion) ?? 'otros';
 }
 
 export function nombreDeGrupo(clave) {
@@ -47,7 +48,7 @@ function jugadorasDe(est, eventos, jugadoresPorId) {
     .map((id) => {
       const j = jugadoresPorId.get(id);
       const propios = eventos.filter((e) => e.jugadorId === id);
-      return { id, nombre: j?.nombre ?? 'jugadora sin registrar', numero: j?.numero ?? null, grupo: grupoDeJugadora(j, liberos.has(id)), ...contar(propios), fundamentos: desglosePorFundamento(propios).filter((f) => f.total > 0) };
+      return { id, nombre: j?.nombre ?? 'jugadora sin registrar', numero: j?.numero ?? null, grupo: grupoDeJugadora(j, liberos.has(id), est.posiciones?.[id]), ...contar(propios), fundamentos: desglosePorFundamento(propios).filter((f) => f.total > 0) };
     })
     .sort((a, b) => orden.indexOf(a.grupo) - orden.indexOf(b.grupo) || (a.numero ?? 999) - (b.numero ?? 999) || a.nombre.localeCompare(b.nombre));
 }
@@ -85,4 +86,23 @@ export function resumenDePartido(est, jugadoresPorId, alcance = 'todo') {
 
 export function porcentaje(valor) {
   return valor == null ? '–' : `${Math.round(valor * 100)}%`;
+}
+
+// Mini-estadística de una jugadora para mirarla durante el partido: ataque y recepción (efectividad) y saque
+// (directos = doble positivo, y errores). Se da para el set en juego y para todo el partido.
+// Solo trae los fundamentos que esa jugadora puede tener (una líbero no ataca ni saca).
+export function miniEstadistica(est, jugadorId, fundamentosPermitidos = ['Ataque', 'Recepción', 'Saque']) {
+  const de = (eventos) => {
+    const propios = eventos.filter((e) => e.jugadorId === jugadorId);
+    const por = (fundamento) => contar(propios.filter((e) => e.fundamento === fundamento));
+    const r = {};
+    if (fundamentosPermitidos.includes('Ataque')) r.ataque = por('Ataque');
+    if (fundamentosPermitidos.includes('Recepción')) r.recepcion = por('Recepción');
+    if (fundamentosPermitidos.includes('Saque')) {
+      const s = por('Saque');
+      r.saque = { ...s, directos: s.doble_positivo, errores: s.error };
+    }
+    return r;
+  };
+  return { set: de(eventosDelAlcance(est, 'actual')), partido: de(eventosDelAlcance(est, 'todo')) };
 }

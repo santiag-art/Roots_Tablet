@@ -93,6 +93,15 @@ export function leerArchivoRoots(contenido) {
     const equipoVisitante = texto(p.equipoVisitante);
     if (!equipoLocal || !equipoVisitante) fallo(`El partido ${p.id} no tiene los dos equipos.`);
     if (p.formatoSets != null && !FORMATOS.includes(p.formatoSets)) fallo(`El partido ${p.id} trae un formato de sets desconocido.`);
+    // Opcional: el marcador de cada set que Roots ya tiene (para compararlo con lo anotado en la tablet).
+    // Los archivos viejos solo traen la cantidad (setsGuardados) y siguen funcionando.
+    const validos = (Array.isArray(p.setsRoots) ? p.setsRoots : []).filter((s) => esEntero(s?.puntosLocal) && esEntero(s?.puntosVisitante) && s.puntosLocal >= 0 && s.puntosVisitante >= 0);
+    // Si todos traen su número de set se respeta; si alguno no lo trae, se numeran por orden (así nunca se repiten).
+    const conNumero = validos.every((s) => esEntero(s.numeroSet) && s.numeroSet > 0) && new Set(validos.map((s) => s.numeroSet)).size === validos.length;
+    const marcadoresRoots = validos
+      .map((s, k) => ({ numeroSet: conNumero ? s.numeroSet : k + 1, puntosLocal: s.puntosLocal, puntosVisitante: s.puntosVisitante }))
+      .sort((a, b) => a.numeroSet - b.numeroSet);
+    const cuantos = esEntero(p.setsGuardados) && p.setsGuardados > 0 ? p.setsGuardados : 0;
     return {
       id: p.id,
       torneoId: p.torneoId,
@@ -101,7 +110,8 @@ export function leerArchivoRoots(contenido) {
       fecha: texto(p.fecha),
       hora: texto(p.hora),
       formatoSets: p.formatoSets ?? null,
-      setsGuardados: esEntero(p.setsGuardados) && p.setsGuardados > 0 ? p.setsGuardados : 0,
+      setsGuardados: Math.max(cuantos, marcadoresRoots.length),
+      marcadoresRoots,
     };
   });
   if (partidos.length === 0) fallo('El archivo no trae ningún partido.');
@@ -147,6 +157,7 @@ export async function aplicarImportacion(almacen, datos, { nombreArchivo = null,
       fecha: p.fecha,
       hora: p.hora,
       setsEnRoots: p.setsGuardados,
+      marcadoresRoots: p.marcadoresRoots,
       importadoDe: [...new Set([...(previo?.importadoDe ?? []), datos.idExportacion])],
     };
     if (!previo) {

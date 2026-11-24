@@ -1,7 +1,7 @@
 // Pantalla de inicio: lista de partidos importados, importar archivo y acceso a resultados.
 import { app, borrarPartidos, cargarDatos, guardarPartido, irA } from '../contexto.js';
 import { aplicarImportacion, ErrorImportacion, leerArchivoRoots } from '../importar.js';
-import { estadoDePartido, fechaCorta, horaCorta, hoyISO, marcadorDeSets, ordenarPorFechaHora, textoDeEstado, textoDeSets } from '../resumen.js';
+import { comparacionConRoots, estadoDePartido, fechaCorta, horaCorta, hoyISO, marcadorDeSets, ordenarPorFechaHora, textoDeEstado, textoDeSets } from '../resumen.js';
 import { abrirVentana, confirmar, informar, toast } from './aviso.js';
 import { h, icono } from './dom.js';
 import { abrirAjustes } from './ajustes.js';
@@ -10,6 +10,7 @@ import { partidosSinCopia } from '../copia.js';
 import { exportarBorradorAhora, importarBorradorSiEs } from './borradorPantalla.js';
 import { guardarCopiaAhora } from './copiaPantalla.js';
 import { abrirNuevoPartido } from './nuevoPartido.js';
+import { bloqueComparacion } from './piezas.js';
 import { abrirRecibir } from './transferir.js';
 
 export async function importarTexto(texto, nombreArchivo) {
@@ -61,7 +62,12 @@ async function abrirPartido(registro) {
   if (estadoDePartido(registro) === 'pendiente' && registro.setsEnRoots > 0 && !registro.avisoRootsVisto) {
     const sigue = await confirmar({
       titulo: 'Roots ya tiene sets de este partido',
-      texto: `En Roots ya hay ${registro.setsEnRoots} set${registro.setsEnRoots > 1 ? 's' : ''} guardado${registro.setsEnRoots > 1 ? 's' : ''} de ${registro.equipoLocal} vs ${registro.equipoVisitante}. Puedes anotarlo igual: al importar los resultados en Roots te preguntará antes de reemplazar lo que ya tiene.`,
+      texto: h(
+        'div',
+        { class: 'ventana-texto' },
+        h('p', { style: { marginBottom: '10px' } }, 'Puedes anotarlo igual: al importar los resultados en Roots te preguntará antes de reemplazar lo que ya tiene.'),
+        bloqueComparacion(registro)
+      ),
       si: 'Abrir el partido',
       no: 'Volver',
     });
@@ -91,6 +97,7 @@ function tarjeta(r) {
   const estado = estadoDePartido(r);
   const sets = textoDeSets(r.est);
   const { local, visitante } = marcadorDeSets(r.est);
+  const cRoots = comparacionConRoots(r);
   return h(
     'div',
     { class: 'partido-tarjeta-envoltura', style: { position: 'relative' } },
@@ -106,7 +113,8 @@ function tarjeta(r) {
         r.creadoEnTablet ? h('span', { class: 'etiqueta' }, 'Creado en la tablet') : null,
         r.setsEnRoots > 0 ? h('span', { class: 'etiqueta etiqueta-aviso' }, `Roots ya tiene ${r.setsEnRoots} set${r.setsEnRoots > 1 ? 's' : ''}`) : null
       ),
-      sets ? h('div', { class: 'detalle-sets' }, `Sets ${local}-${visitante} · ${sets}`) : null
+      sets ? h('div', { class: 'detalle-sets' }, `Tablet: ${local}-${visitante} · ${sets}`) : null,
+      cRoots?.detalle ? h('div', { class: 'detalle-sets detalle-roots' }, `Roots: ${cRoots.roots.local}-${cRoots.roots.visitante} · ${cRoots.roots.texto}`) : null
     ),
     h('button', { class: 'partido-borrar', 'aria-label': 'Borrar este partido de la tablet', onclick: () => borrarUno(r) }, icono('basura'))
   );
@@ -170,6 +178,7 @@ export function vistaInicio() {
         h('button', { class: 'btn btn-primario', onclick: elegirArchivo }, icono('subir'), 'Importar archivo'),
         h('button', { class: 'btn', onclick: recibir }, icono('documento'), 'Recibir'),
         h('button', { class: 'btn', onclick: abrirNuevoPartido }, icono('mas'), 'Nuevo partido'),
+        h('button', { class: 'btn', 'data-ir-rivales': '', onclick: () => irA('#/rivales') }, icono('lista'), 'Rivales'),
         h('button', { class: 'btn', onclick: () => irA('#/exportar') }, icono('bajar'), 'Resultados'),
         h('button', { class: 'btn-icono', 'aria-label': 'Ajustes', onclick: abrirAjustes }, icono('menu'))
       )

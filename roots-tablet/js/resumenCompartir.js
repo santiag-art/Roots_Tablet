@@ -58,10 +58,21 @@ const positivas = (c) => c.doble_positivo + c.positivo;
 export function datosResumenPartido({ partido, torneo, jugadores, eventos }) {
   const esVisitante = partido.ladoPropio === 'visitante';
   const rival = esVisitante ? partido.equipoLocal : partido.equipoVisitante;
-  const sets = (partido.sets ?? []).map((s) => ({
-    roots: esVisitante ? s.visitante : s.local,
-    rival: esVisitante ? s.local : s.visitante,
-  }));
+  const sets = (partido.sets ?? []).map((s) => {
+    const tiemposLocal = s.tiemposLocal ?? null;
+    const tiemposVisitante = s.tiemposVisitante ?? null;
+    return {
+      roots: esVisitante ? s.visitante : s.local,
+      rival: esVisitante ? s.local : s.visitante,
+      // Tiempos muertos que pidió cada equipo en el set (null si no se registraron).
+      tmRoots: esVisitante ? tiemposVisitante : tiemposLocal,
+      tmRival: esVisitante ? tiemposLocal : tiemposVisitante,
+    };
+  });
+  const tiemposRoots = sets.reduce((a, s) => a + (s.tmRoots ?? 0), 0);
+  const tiemposRival = sets.reduce((a, s) => a + (s.tmRival ?? 0), 0);
+  // Solo se muestran si alguien pidió al menos uno en el partido (con todos en cero no aportan nada).
+  const hayTiemposMuertos = tiemposRoots + tiemposRival > 0;
   const setsRoots = sets.filter((s) => s.roots > s.rival).length;
   const setsRival = sets.filter((s) => s.rival > s.roots).length;
   const gano = setsRoots > setsRival;
@@ -132,6 +143,9 @@ export function datosResumenPartido({ partido, torneo, jugadores, eventos }) {
     subtitulo: [GENERO_LABEL[torneo?.genero], CATEGORIA_LABEL[torneo?.categoria]].filter(Boolean).join(' · '),
     fecha: formatearFechaLarga(partido.fecha),
     sets,
+    hayTiemposMuertos,
+    tiemposRoots,
+    tiemposRival,
     setsRoots,
     setsRival,
     gano,
@@ -306,13 +320,14 @@ export function dibujarResumen(datos, logo = null, crearCanvas = (w, h) => Objec
   // Sets uno a uno
   if (datos.sets.length > 0) {
     const n = datos.sets.length;
+    const altoSet = datos.hayTiemposMuertos ? 150 : 120;
     const gap = 16;
     const ancho = (ANCHO - 2 * MARGEN - gap * (n - 1)) / n;
     datos.sets.forEach((s, i) => {
       const x = MARGEN + i * (ancho + gap);
       const ganado = s.roots > s.rival;
       ctx.fillStyle = ganado ? VERDE_FONDO : '#ffffff';
-      rectRedondeado(ctx, x, y, ancho, 120, 22);
+      rectRedondeado(ctx, x, y, ancho, altoSet, 22);
       ctx.fill();
       ctx.strokeStyle = ganado ? '#6ee7b7' : GRIS_CLARO;
       ctx.lineWidth = 2;
@@ -324,8 +339,21 @@ export function dibujarResumen(datos, logo = null, crearCanvas = (w, h) => Objec
       ctx.fillStyle = ganado ? VERDE : NAVY;
       ctx.font = `bold ${n > 4 ? 36 : 44}px ${FUENTE}`;
       ctx.fillText(`${s.roots} - ${s.rival}`, x + ancho / 2, y + 90);
+      if (datos.hayTiemposMuertos) {
+        ctx.fillStyle = GRIS;
+        ctx.font = `normal 22px ${FUENTE}`;
+        ctx.fillText(s.tmRoots != null || s.tmRival != null ? `TM ${s.tmRoots ?? 0} - ${s.tmRival ?? 0}` : 'TM —', x + ancho / 2, y + 128);
+      }
     });
-    y += 120 + 40;
+    y += altoSet;
+    if (datos.hayTiemposMuertos) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = GRIS;
+      ctx.font = `normal 24px ${FUENTE}`;
+      ctx.fillText(`Tiempos muertos: ${datos.equipo} ${datos.tiemposRoots} · ${datos.rival} ${datos.tiemposRival}`, mitad, y + 40);
+      y += 50;
+    }
+    y += 40;
   }
 
   // Mejores jugadoras
@@ -413,7 +441,12 @@ export function datosDeRegistro({ registro, torneo, jugadores }) {
       equipoVisitante: registro.equipoVisitante,
       ladoPropio: est.ladoPropio,
       fecha: registro.fecha,
-      sets: est.sets.map((s) => ({ local: s.puntosLocal, visitante: s.puntosVisitante })),
+      sets: est.sets.map((s) => ({
+        local: s.puntosLocal,
+        visitante: s.puntosVisitante,
+        tiemposLocal: s.tiemposMuertos?.local ?? null,
+        tiemposVisitante: s.tiemposMuertos?.visitante ?? null,
+      })),
     },
     torneo,
     jugadores,

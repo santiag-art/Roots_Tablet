@@ -18,7 +18,8 @@ export function nombreArchivoResultados(ahora = new Date()) {
   return `roots-resultados-${ahora.getFullYear()}-${dosDigitos(ahora.getMonth() + 1)}-${dosDigitos(ahora.getDate())}.json`;
 }
 
-const titular = (t) => ({ jugadorId: t.jugadorId, esLibero: Boolean(t.esLibero), tipoLibero: t.tipoLibero ?? null, posicion: t.posicion ?? null });
+// `posicion` es la casilla de la cancha (1 a 6); `posicionJugada`, con qué posición jugó en el partido (Roots la guarda igual).
+const titular = (t) => ({ jugadorId: t.jugadorId, esLibero: Boolean(t.esLibero), tipoLibero: t.tipoLibero ?? null, posicion: t.posicion ?? null, posicionJugada: t.esLibero ? null : t.posicionJugada ?? null });
 
 const sustitucion = (s) => ({
   orden: s.id,
@@ -27,6 +28,8 @@ const sustitucion = (s) => ({
   porLibero: Boolean(s.porLibero),
   excepcional: Boolean(s.excepcional),
   nuevoLibero: Boolean(s.nuevoLibero),
+  // Con qué posición entró (solo en cambios normales; los del líbero no la llevan).
+  posicionEntra: s.porLibero || s.nuevoLibero ? null : s.posicionEntra ?? null,
   puntosLocal: s.puntosLocal ?? 0,
   puntosVisitante: s.puntosVisitante ?? 0,
   creadoEn: s.creado_en ?? null,

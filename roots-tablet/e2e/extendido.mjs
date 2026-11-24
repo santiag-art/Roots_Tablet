@@ -7,6 +7,8 @@ const { s, puerto } = await servir(RAIZ);
 const nav = await chromium.launch();
 const ctx = await nav.newContext({ viewport: { width: 1280, height: 800 }, hasTouch: true, acceptDownloads: true });
 const page = await ctx.newPage();
+// Estos recorridos no prueban el detalle de los puntos del rival (lo cubre e2e/puntoRival.mjs): se apaga para que no abra la ventana.
+await page.addInitScript(() => localStorage.setItem('roots-detalle-rival', JSON.stringify({ activo: false })));
 const errs = [];
 page.on('pageerror', (e) => errs.push('pageerror ' + e.message));
 page.on('console', (m) => m.type() === 'error' && errs.push('console ' + m.text()));
@@ -38,7 +40,10 @@ await page.click('.partido-tarjeta:has-text("Halcones")');
 await page.waitForSelector('.cancha');
 ok((await est()).formatoSets === 'mejor_de_5', 'formato mejor de 5 viene del archivo');
 const filas = page.locator('.fila-jugador');
-for (let i = 0; i < 6; i++) await filas.nth(i).click();
+for (let i = 0; i < 6; i++) {
+  await filas.nth(i).click();
+  await page.click('[data-pregunta-posicion] .opcion.principal'); // acepta la posición sugerida
+}
 await page.click('text=Dos líberos');
 const cupos = page.locator('.cupo');
 async function elegirLibero(n, patron) {
@@ -79,8 +84,11 @@ await page.locator('.casilla').first().click();
 await esperar(600); 
 await page.click('.opcion:has-text("Hacer un cambio")');
 await page.locator('.ventana-fondo:not(.saliendo) .opcion').nth(0).click();
+await page.waitForSelector('[data-pregunta-posicion]'); // pregunta con qué posición entra
+await page.click('[data-pregunta-posicion] .opcion[data-posicion="Central"]');
 await esperar();
 ok((await est()).actual.sustituciones.filter((x) => !x.porLibero).length === 1, 'cambio registrado');
+ok((await est()).actual.sustituciones.find((x) => !x.porLibero).posicionEntra === 'Central', 'el cambio guarda con qué posición entró');
 
 // tiempo muerto y "me equivoqué"
 await page.click('.eq-local .chip-tm');

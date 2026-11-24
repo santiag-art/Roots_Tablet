@@ -19,7 +19,9 @@ import {
 } from './reglas/reglasSustitucion.js';
 import { fundamentosPermitidos } from './reglas/fundamentosPosicion.js';
 import { posicionNeutra } from './reglas/posiciones.js';
+import { jugadorEnPartido, posicionDeJuego, posicionEstandar, posicionValida } from './posicionPartido.js';
 import { avisoSacadorFueraDeRotacion } from './reglas/faltaPosicion.js';
+import { limpiarDetalle } from './puntosRival.js';
 
 export const MAX_SUSTITUCIONES = 6;
 export const TIEMPOS_POR_SET = 2;
@@ -56,6 +58,10 @@ export function nuevoSetEnCurso(anterior = null) {
     sustituciones: [],
     eventos: [],
     historial: [],
+    // Quién anotó cada punto del set, en orden ('local' | 'visitante'). Sirve para detectar rachas.
+    puntosSeq: [],
+    // En paralelo a puntosSeq: con qué rotación del equipo (0 a 5) y quién tenía el saque cuando cayó cada punto.
+    puntosInfo: [],
   };
 }
 
@@ -73,6 +79,8 @@ export function nuevoEstadoPartido(partido) {
     sets: [], // sets cerrados: { numeroSet, puntosLocal, puntosVisitante, titulares, sustituciones, eventos, tiemposMuertos }
     finalizado: false, // "Terminar partido" (el partido también queda decidido solo al ganar los sets necesarios)
     siguienteId: 1,
+    // Posición con que juega cada jugadora en este partido: jugadoraId -> nombre de la posición (ver posicionPartido.js).
+    posiciones: {},
     actual: nuevoSetEnCurso(),
     creadoEn: new Date().toISOString(),
     actualizadoEn: null,
@@ -133,6 +141,10 @@ export function derivados(est, ctx) {
       Boolean(est.formatoSets) &&
       requiereCambioDeCancha({ numeroSet: numeroSetActual, totalSets, puntosLocal: act.puntosLocal, puntosVisitante: act.puntosVisitante }),
     nombre: (id) => jugadoresPorId.get(id)?.nombre ?? 'jugadora sin registrar',
+    // Posición con que juega en ESTE partido (la elegida al entrar o, si no hay, la de su ficha).
+    posicionDe: (id) => posicionDeJuego(est, jugadoresPorId.get(id)),
+    jugadorEnPartido: (id) => jugadorEnPartido(est, jugadoresPorId.get(id)),
+    jugadoresEnPartido: new Map(ctx.jugadores.map((j) => [j.id, jugadorEnPartido(est, j)])),
   };
 }
 
@@ -211,6 +223,17 @@ function slotsSinLiberos(act, d) {
   return act.slots.map((jid) => (jid != null && d.reemplazados.has(jid) ? d.reemplazados.get(jid) : jid));
 }
 
+// Guarda con qué posición juega en este partido. `posicion` null/undefined = no tocar lo que ya hay.
+function exigirPosicionValida(posicion) {
+  if (!posicionValida(posicion)) fallo('Esa posición no es válida: elige Atacante, Colocación, Central, Ataque opuesto o Líbero.');
+}
+
+function fijarPosicion(est, jugadorId, posicion) {
+  if (posicion == null) return;
+  est.posiciones = est.posiciones ?? {};
+  est.posiciones[jugadorId] = posicionEstandar(posicion);
+}
+
 function jugadorDelTorneo(ctx, jugadorId) {
   return ctx.jugadores.some((j) => j.id === jugadorId);
 }
@@ -284,8 +307,9 @@ export function quitarLibero(est, clave) {
 }
 
 // Un toque: entra en la primera casilla libre, o sale si ya estaba en cancha.
-export function toggleJugador(est, ctx, jugadorId) {
+export function toggleJugador(est, ctx, jugadorId, { posicion = null } = {}) {
   exigirPlantillaAbierta(est);
+  exigirPosicionValida(posicion);
   const d = derivados(est, ctx);
   if (d.esLiberoId(jugadorId)) return; // ya tiene su propio cupo
   const slots = est.actual.slots;
@@ -298,12 +322,14 @@ export function toggleJugador(est, ctx, jugadorId) {
   const libre = slots.indexOf(null);
   if (libre < 0) fallo('En cancha solo pueden estar 6 jugadores (los líberos van aparte).');
   slots[libre] = jugadorId;
+  fijarPosicion(est, jugadorId, posicion);
 }
 
 // Poner a alguien en una posición concreta. Si estaba ocupada, el ocupante cambia de lugar con el jugador de origen
 // (o vuelve a la banca si el jugador venía de la plantilla).
-export function colocarEnPosicion(est, ctx, jugadorId, indiceDestino) {
+export function colocarEnPosicion(est, ctx, jugadorId, indiceDestino, { posicion = null } = {}) {
   exigirPlantillaAbierta(est);
+  exigirPosicionValida(posicion);
   const d = derivados(est, ctx);
   const act = est.actual;
   const ocupante = act.slots[indiceDestino];
@@ -314,6 +340,15 @@ export function colocarEnPosicion(est, ctx, jugadorId, indiceDestino) {
   if (claveLibero) act.liberos[claveLibero] = ocupante ?? null;
   if (indiceOrigen >= 0) act.slots[indiceOrigen] = ocupante ?? null;
   act.slots[indiceDestino] = jugadorId;
+  fijarPosicion(est, jugadorId, posicion);
+}
+
+// Cambiar con qué posición juega alguien de la plantilla (antes de confirmar), sin moverla de lugar.
+export function elegirPosicion(est, ctx, jugadorId, posicion) {
+  exigirPlantillaAbierta(est);
+  if (posicion == null || !posicionValida(posicion)) fallo('Esa posición no es válida: elige Atacante, Colocación, Central, Ataque opuesto o Líbero.');
+  if (!jugadorDelTorneo(ctx, jugadorId)) fallo('Esa jugadora no está en la plantilla de este torneo.');
+  fijarPosicion(est, jugadorId, posicion);
 }
 
 // Poner a alguien como líbero (recepción, defensa o único). Si el cupo estaba ocupado, el anterior ocupa el lugar de origen.
@@ -361,9 +396,10 @@ export function confirmarPlantilla(est, ctx) {
     // Los cambios de líbero del intento anterior ya no aplican a la formación nueva.
     act.sustituciones = act.sustituciones.filter((x) => !x.porLibero);
     // Lo que se guarda es la formación actual: de ahí cuentan las rotaciones desde cero.
-    const filas = act.slots.map((jugadorId, i) => ({ id: nuevoId(est), jugadorId, esLibero: false, tipoLibero: null, posicion: i + 1 }));
+    // `posicion` es la casilla (1 a 6); `posicionJugada`, con qué posición juega (la que se eligió o la de su ficha).
+    const filas = act.slots.map((jugadorId, i) => ({ id: nuevoId(est), jugadorId, esLibero: false, tipoLibero: null, posicion: i + 1, posicionJugada: posicionEstandar(d.posicionDe(jugadorId)) }));
     d.tiposLibero.forEach((tipo) => {
-      if (act.liberos[tipo]) filas.push({ id: nuevoId(est), jugadorId: act.liberos[tipo], esLibero: true, tipoLibero: tipo, posicion: null });
+      if (act.liberos[tipo]) filas.push({ id: nuevoId(est), jugadorId: act.liberos[tipo], esLibero: true, tipoLibero: tipo, posicion: null, posicionJugada: null });
     });
     act.titulares = filas;
     act.rotaciones = 0;
@@ -509,8 +545,9 @@ export function designarNuevoLibero(est, ctx, lesionadoId, nuevoId_) {
 
 // ─────────────────────────── Cambios (sustituciones) ───────────────────────────
 
-export function ejecutarSustitucion(est, ctx, saleId, entraId, { excepcional = false } = {}) {
+export function ejecutarSustitucion(est, ctx, saleId, entraId, { excepcional = false, posicion = null } = {}) {
   return transaccion(est, () => {
+    exigirPosicionValida(posicion);
     const act = est.actual;
     const d = derivados(est, ctx);
     if (!act.plantillaConfirmada) fallo('Confirma la plantilla antes de hacer cambios.');
@@ -552,6 +589,10 @@ export function ejecutarSustitucion(est, ctx, saleId, entraId, { excepcional = f
       if (error) fallo(error);
     }
 
+    // Con qué posición entra: la que se eligió ahora o, si no, la que ya tenía en el partido (o su ficha).
+    const tenia = Object.hasOwn(est.posiciones ?? {}, entraId);
+    const posicionAntes = tenia ? est.posiciones[entraId] : null;
+    fijarPosicion(est, entraId, posicion);
     const nueva = {
       id: nuevoId(est),
       jugadorSaleId: saleId,
@@ -559,6 +600,7 @@ export function ejecutarSustitucion(est, ctx, saleId, entraId, { excepcional = f
       porLibero: false,
       excepcional: Boolean(excepcional),
       nuevoLibero: false,
+      posicionEntra: posicionEstandar(posicionDeJuego(est, d.jugadoresPorId.get(entraId))),
       puntosLocal: act.puntosLocal,
       puntosVisitante: act.puntosVisitante,
       creado_en: ahoraISO(ctx),
@@ -570,6 +612,8 @@ export function ejecutarSustitucion(est, ctx, saleId, entraId, { excepcional = f
       sub: nueva,
       saleId,
       entraId,
+      // Para que "Deshacer" devuelva también la posición que se había elegido al entrar.
+      ...(posicion != null ? { posicionAntes: { jugadorId: entraId, tenia, valor: posicionAntes } } : {}),
       texto: `${excepcional ? 'Cambio excepcional' : 'Cambio'}: entra ${d.nombre(entraId)} por ${d.nombre(saleId)}`,
     });
     return nueva;
@@ -625,6 +669,8 @@ export function sumarPunto(est, ctx, lado, nombresEquipos = {}) {
     const sacabaAntes = act.saca;
     let rotacion = null;
     cambiarPuntos(act, lado, 1);
+    act.puntosSeq = [...(act.puntosSeq ?? []), lado];
+    act.puntosInfo = [...(act.puntosInfo ?? []), { rot: siguiendoSaque ? act.rotaciones : null, saca: sacabaAntes ?? null }];
     if (siguiendoSaque && lado !== sacabaAntes) {
       act.saca = lado;
       if (lado === est.ladoPropio) {
@@ -636,6 +682,25 @@ export function sumarPunto(est, ctx, lado, nombresEquipos = {}) {
   });
 }
 
+// Cómo anotó el rival su último punto (motivo y, si fue ataque, zonas). Queda junto al punto en `puntosInfo`, así que
+// "Deshacer" lo quita con él. Solo vale para el último movimiento, cuando fue un punto del rival.
+export function detallarPuntoRival(est, detalle) {
+  return transaccion(est, () => {
+    const act = est.actual;
+    const ultima = act.historial.at(-1);
+    if (ultima?.tipo !== 'punto' || ultima.lado === est.ladoPropio) fallo('Solo se puede detallar el último punto cuando es del rival.');
+    const limpio = limpiarDetalle(detalle);
+    if (!limpio) fallo('Elige cómo anotó el rival.');
+    const seq = act.puntosSeq ?? [];
+    const i = seq.lastIndexOf(ultima.lado);
+    if (i < 0) fallo('No se encontró ese punto.');
+    const info = [...(act.puntosInfo ?? [])];
+    info[i] = { ...(info[i] ?? { rot: null, saca: null }), detalle: limpio };
+    act.puntosInfo = info;
+    return limpio;
+  });
+}
+
 export function restarPunto(est, ctx, lado, nombresEquipos = {}) {
   const act = est.actual;
   // Si el último movimiento fue un punto de ese mismo equipo, quitarlo equivale a deshacerlo (también la rotación y el saque).
@@ -643,8 +708,18 @@ export function restarPunto(est, ctx, lado, nombresEquipos = {}) {
   if (ultima?.tipo === 'punto' && ultima.lado === lado) return deshacerUltimaAccion(est, ctx);
   if ((lado === 'local' ? act.puntosLocal : act.puntosVisitante) === 0) return null;
   cambiarPuntos(act, lado, -1);
+  const seq = [...(act.puntosSeq ?? [])];
+  const seqIdx = seq.lastIndexOf(lado);
+  const info = [...(act.puntosInfo ?? [])];
+  let infoQuitada = null;
+  if (seqIdx >= 0) {
+    seq.splice(seqIdx, 1);
+    infoQuitada = info.splice(seqIdx, 1)[0] ?? null;
+  }
+  act.puntosSeq = seq;
+  act.puntosInfo = info;
   const nombre = nombresEquipos[lado] ?? (lado === 'local' ? 'Local' : 'Visitante');
-  registrarAccion(act, { tipo: 'resta', lado, texto: `Resta a ${nombre}` });
+  registrarAccion(act, { tipo: 'resta', lado, seqIdx, infoQuitada, texto: `Resta a ${nombre}` });
   return null;
 }
 
@@ -656,11 +731,11 @@ export function registrarJugada(est, ctx, jugadorId, fundamento, calificacion, {
     const d = derivados(est, ctx);
     const jugador = d.jugadoresPorId.get(jugadorId);
     if (!jugador) fallo('Ese jugador no está en la plantilla de este torneo.');
-    const permitidos = fundamentosPermitidos(jugador, { esLibero: d.esLiberoId(jugadorId) });
+    const permitidos = fundamentosPermitidos(d.jugadorEnPartido(jugadorId), { esLibero: d.esLiberoId(jugadorId) });
     if (!permitidos.includes(fundamento)) {
       fallo(d.esLiberoId(jugadorId) && (fundamento === 'Saque' || fundamento === 'Bloqueo')
         ? `El líbero no puede ${fundamento === 'Saque' ? 'sacar' : 'bloquear'} (regla 19.3.1.3): no se le registra ${fundamento.toLowerCase()}.`
-        : `A un jugador de la posición ${d.esLiberoId(jugadorId) ? 'Líbero' : posicionNeutra(jugador.posicion)} no se le registra ${fundamento.toLowerCase()}; solo: ${permitidos.join(', ').toLowerCase()}.`);
+        : `A un jugador de la posición ${d.esLiberoId(jugadorId) ? 'Líbero' : posicionNeutra(d.posicionDe(jugadorId))} no se le registra ${fundamento.toLowerCase()}; solo: ${permitidos.join(', ').toLowerCase()}.`);
     }
     if (!['doble_positivo', 'positivo', 'negativo', 'error'].includes(calificacion)) fallo('Elige una calificación.');
     // Si saca alguien que no está en P1 mientras sacamos, la formación no sigue la rotación: se avisa (sin bloquear la jugada).
@@ -675,6 +750,8 @@ export function registrarJugada(est, ctx, jugadorId, fundamento, calificacion, {
       calificacion,
       enConjunto: fundamento === 'Bloqueo' && calificacion === 'doble_positivo' && Boolean(bloqueoEnConjunto),
       paseRecibido: fundamento === 'Colocación' ? paseRecibido ?? null : null,
+      // Rotación del equipo (0 a 5) cuando se anotó la jugada; sirve para ver qué rotación recibe peor.
+      rotacion: act.plantillaConfirmada && act.slots.filter((id) => id != null).length === 6 ? act.rotaciones : null,
       creado_en: ahoraISO(ctx),
     };
     act.eventos.push(nuevo);
@@ -714,12 +791,35 @@ export function deshacerUltimaAccion(est) {
     if (ultima.rotacion) revertirRotacion(act, ultima.rotacion);
     cambiarPuntos(act, ultima.lado, -1);
     act.saca = ultima.sacabaAntes ?? null;
+    const seq = [...(act.puntosSeq ?? [])];
+    const info = [...(act.puntosInfo ?? [])];
+    const i = seq.lastIndexOf(ultima.lado);
+    if (i >= 0) {
+      seq.splice(i, 1);
+      info.splice(i, 1);
+    }
+    act.puntosSeq = seq;
+    act.puntosInfo = info;
   } else if (ultima.tipo === 'resta') {
     cambiarPuntos(act, ultima.lado, 1);
+    if (Number.isInteger(ultima.seqIdx) && ultima.seqIdx >= 0) {
+      const seq = [...(act.puntosSeq ?? [])];
+      const info = [...(act.puntosInfo ?? [])];
+      const donde = Math.min(ultima.seqIdx, seq.length);
+      seq.splice(donde, 0, ultima.lado);
+      info.splice(donde, 0, ultima.infoQuitada ?? { rot: null, saca: null });
+      act.puntosSeq = seq;
+      act.puntosInfo = info;
+    }
   } else if (ultima.tipo === 'jugada') {
     act.eventos = act.eventos.filter((e) => e.id !== ultima.id);
   } else if (ultima.tipo === 'sustitucion') {
     revertirSustitucion(act, ultima);
+    const antes = ultima.posicionAntes;
+    if (antes && est.posiciones) {
+      if (antes.tenia) est.posiciones[antes.jugadorId] = antes.valor;
+      else delete est.posiciones[antes.jugadorId];
+    }
   } else if (ultima.tipo === 'nuevoLibero') {
     // El líbero anterior vuelve a su cupo y se borra la designación.
     act.sustituciones = act.sustituciones.filter((x) => x.id !== ultima.sub.id);
@@ -757,6 +857,8 @@ export function guardarSet(est, ctx, puntosLocal, puntosVisitante) {
       titulares: act.titulares,
       sustituciones: act.sustituciones,
       eventos: act.eventos,
+      puntosSeq: [...(act.puntosSeq ?? [])],
+      puntosInfo: [...(act.puntosInfo ?? [])],
       tiemposMuertos: { ...act.tiemposMuertos },
       // Cómo quedó la cancha al cerrar el set: sirve para reabrirlo exactamente como estaba (no viaja a Roots).
       cierre: { slots: [...act.slots], rotaciones: act.rotaciones, saca: act.saca, primerSaque: act.primerSaque },
@@ -835,7 +937,13 @@ export function reabrirUltimoSet(est) {
     nuevo.tiemposMuertos = { ...ultimo.tiemposMuertos };
     nuevo.titulares = ultimo.titulares;
     nuevo.sustituciones = ultimo.sustituciones;
+    // Vuelven las posiciones con que se jugó ese set (la elección del set siguiente, si ya había una, se descarta).
+    est.posiciones = est.posiciones ?? {};
+    ultimo.titulares.filter((t) => !t.esLibero && t.posicionJugada).forEach((t) => { est.posiciones[t.jugadorId] = t.posicionJugada; });
+    ultimo.sustituciones.filter((x) => !x.porLibero && !x.nuevoLibero && x.posicionEntra).forEach((x) => { est.posiciones[x.jugadorEntraId] = x.posicionEntra; });
     nuevo.eventos = ultimo.eventos;
+    nuevo.puntosSeq = Array.isArray(ultimo.puntosSeq) ? [...ultimo.puntosSeq] : [];
+    nuevo.puntosInfo = Array.isArray(ultimo.puntosInfo) && ultimo.puntosInfo.length === nuevo.puntosSeq.length ? [...ultimo.puntosInfo] : nuevo.puntosSeq.map(() => ({ rot: null, saca: null }));
     nuevo.slots = aplicarSustituciones(slotsDesdeTitulares(ultimo.titulares.filter((t) => !t.esLibero)), ultimo.sustituciones.filter((s) => !s.nuevoLibero));
     nuevo.plantillaConfirmada = ultimo.titulares.length > 0;
     nuevo.saca = null; // sin cierre guardado (set antiguo) el saque se vuelve a elegir
@@ -858,5 +966,16 @@ export function reabrirUltimoSet(est) {
 // Vuelve a dejar un estado leído del almacenamiento en una forma segura (por si se guardó con una versión anterior).
 export function normalizarEstado(est) {
   if (!est || typeof est !== 'object' || est.version !== VERSION_ESTADO || !est.actual) return null;
+  // Los partidos guardados antes de que existiera la posición por partido no la traen: valen las de las fichas.
+  if (est.posiciones == null || typeof est.posiciones !== 'object') est.posiciones = {};
+  // Los partidos guardados antes de las rachas no traen la secuencia de puntos: empieza vacía.
+  // Cada punto lleva su rotación y su saque; los que se anotaron antes de esta versión quedan "sin rotación".
+  for (const set of [...(est.sets ?? []), est.actual]) {
+    if (!Array.isArray(set.puntosSeq)) {
+      if (set === est.actual) set.puntosSeq = [];
+      else continue;
+    }
+    if (!Array.isArray(set.puntosInfo) || set.puntosInfo.length !== set.puntosSeq.length) set.puntosInfo = set.puntosSeq.map(() => ({ rot: null, saca: null }));
+  }
   return est;
 }

@@ -1,13 +1,17 @@
 // Pestaña "Plantilla": cancha, rotación, líberos y banca.
 import {
   MAX_SUSTITUCIONES, alineadosNoAptos, cambiarModoLibero, colocarComoLibero, colocarEnPosicion, confirmarPlantilla, designarNuevoLibero, devolverABanca,
-  editarPlantilla, ejecutarSustitucion, entrarLibero, quitarLibero, rotarAMano, rotarCancha, salirLibero, toggleJugador,
+  editarPlantilla, ejecutarSustitucion, elegirPosicion, entrarLibero, quitarLibero, rotarAMano, rotarCancha, salirLibero, toggleJugador,
 } from '../motor.js';
 import { app } from '../contexto.js';
 import { avisoFaltaDePosicion, revisarFormacion } from '../reglas/faltaPosicion.js';
 import { INFO_LIBERO } from '../reglas/liberos.js';
 import { FILAS_CANCHA, nombrePosicion, todasLasRotaciones } from '../reglas/rotaciones.js';
-import { abrirVentana, confirmar } from './aviso.js';
+import { abrirVentana, confirmar, toast } from './aviso.js';
+import { iniciarArrastre } from './arrastrar.js';
+import { interpretarSoltar } from '../soltar.js';
+import { abreviaturaPosicion } from '../posicionPartido.js';
+import { preguntarPosicion } from './preguntarPosicion.js';
 import { h, icono, nombreCorto, rellenar } from './dom.js';
 import { circuloJugador, circuloVacio, insigniaDisponibilidad, opcionJugador, subtituloJugador } from './piezas.js';
 
@@ -21,18 +25,62 @@ function casilla(V, indice) {
   const id = act.slots[indice];
   const posicion = indice + 1;
   const saca = posicion === 1 && d.sacamos === true;
+  // Armando la plantilla se arrastra a quien está en la casilla (cambiarla de lugar, ponerla de líbero o devolverla a la banca).
+  const puedeArrastrarDeCasilla = !act.plantillaConfirmada && id != null && !V.bloqueado;
   return h(
     'button',
-    { class: 'casilla', 'aria-label': `P${posicion}${id != null ? `, ${d.nombre(id)}` : ', vacía'}`, onclick: () => (act.plantillaConfirmada ? abrirCasillaEnJuego(V, indice) : abrirCasillaArmado(V, indice)) },
+    {
+      class: `casilla ${puedeArrastrarDeCasilla ? 'arrastrable' : ''}`,
+      'data-destino': `slot-${indice}`,
+      'aria-label': `P${posicion}${id != null ? `, ${d.nombre(id)}` : ', vacía'}`,
+      onclick: () => (act.plantillaConfirmada ? abrirCasillaEnJuego(V, indice) : abrirCasillaArmado(V, indice)),
+      onpointerdown: puedeArrastrarDeCasilla ? (e) => iniciarArrastre(e, { jugadorId: id }, d.nombre(id), (p, destino) => soltarEn(V, p, destino)) : null,
+    },
     h('span', { class: `pos ${saca ? 'saque' : ''}` }, `P${posicion}`),
     id != null ? circuloJugador(V, id) : circuloVacio(),
-    id != null ? h('span', { class: 'nombre-pill' }, nombreCorto(d.nombre(id))) : null
+    id != null ? h('span', { class: 'nombre-pill' }, nombreCorto(d.nombre(id))) : null,
+    id != null && !d.esLiberoId(id) && abreviaturaPosicion(d.posicionDe(id)) ? h('span', { class: 'rol-pill', title: `Juega de ${d.posicionDe(id)}` }, abreviaturaPosicion(d.posicionDe(id))) : null
   );
 }
 
 function cancha(V) {
   const orden = FILAS_CANCHA.flatMap((f) => f.posiciones.map((p) => p - 1));
   return h('div', { class: 'cancha', style: { backgroundImage: 'url(img/cancha-roots.jpg)' }, role: 'group', 'aria-label': 'Cancha' }, h('div', { class: 'cancha-zona' }, orden.map((i) => casilla(V, i))));
+}
+
+// ─────────────── Arrastrar y soltar ───────────────
+// Lo que significa soltar está en soltar.js (puro y probado); aquí solo se ejecuta con el motor.
+async function soltarEn(V, { jugadorId }, destino) {
+  if (V.bloqueado) return V.avisoBloqueado();
+  const { d, est } = V;
+  const accion = interpretarSoltar({ confirmada: est.actual.plantillaConfirmada, d, slots: est.actual.slots, jugadorId, destino });
+  if (!accion) return;
+  switch (accion.tipo) {
+    case 'colocar': {
+      // Si viene de fuera de la cancha (banca o cupo de líbero) se pregunta con qué posición juega; si solo cambia de casilla, no.
+      let posicion = null;
+      if (!est.actual.slots.includes(accion.jugadorId)) {
+        posicion = await preguntarPosicion(V, accion.jugadorId);
+        if (!posicion) return;
+      }
+      V.aplicar((e, c) => colocarEnPosicion(e, c, accion.jugadorId, accion.indice, { posicion }));
+      break;
+    }
+    case 'libero': V.aplicar((e, c) => colocarComoLibero(e, c, accion.jugadorId, accion.clave)); break;
+    case 'banca': V.aplicar((e, c) => devolverABanca(e, c, accion.jugadorId)); break;
+    case 'entrarLibero': V.aplicar((e, c) => entrarLibero(e, c, accion.liberoId, accion.saleId)); break;
+    case 'aviso': toast(accion.texto, 'error'); break;
+    case 'cambio': {
+      // Un solo paso: la ventana pregunta con qué posición entra y elegirla confirma el cambio.
+      const posicion = await preguntarPosicion(V, accion.entraId, {
+        titulo: 'Hacer un cambio',
+        texto: `¿Entra ${d.nombre(accion.entraId)} por ${d.nombre(accion.saleId)}? Cuenta como cambio (${d.sustitucionesUsadas}/${MAX_SUSTITUCIONES} en este set). Si es por lesión, usa el botón de la casilla para marcarlo como excepcional. Elige su posición para confirmar.`,
+      });
+      if (posicion) V.aplicar((e, c) => ejecutarSustitucion(e, c, accion.saleId, accion.entraId, { excepcional: false, posicion }));
+      break;
+    }
+    default: break;
+  }
 }
 
 // ─────────────── Armado de la plantilla ───────────────
@@ -50,10 +98,22 @@ function abrirCasillaArmado(V, indice) {
       h(
         'div',
         { class: 'lista-opciones' },
+        ocupante != null ? h('button', { class: 'opcion', onclick: async () => { const posicion = await preguntarPosicion(V, ocupante); if (!posicion) return; V.aplicar((e, c) => elegirPosicion(e, c, ocupante, posicion)); cerrar(); } }, icono('rotar'), h('span', { class: 'datos' }, h('strong', {}, 'Cambiar su posición'), h('small', {}, `Juega de ${d.posicionDe(ocupante) ?? 'sin posición'}`))) : null,
         ocupante != null ? h('button', { class: 'opcion peligro', onclick: () => { V.aplicar((e, c) => devolverABanca(e, c, ocupante)); cerrar(); } }, icono('cerrar'), h('span', { class: 'datos' }, h('strong', {}, 'Quitar de la cancha'))) : null,
-        candidatos.map((j) => opcionJugador(V, j.id, { nota: dePlantilla(j.id), onclick: () => { V.aplicar((e, c) => colocarEnPosicion(e, c, j.id, indice)); cerrar(); } }))
+        candidatos.map((j) => opcionJugador(V, j.id, { nota: dePlantilla(j.id), onclick: () => entrarACancha(V, j.id, indice, cerrar) }))
       ),
   });
+}
+
+// Pone a alguien en una casilla. Si viene de fuera de la cancha (banca o cupo de líbero), pregunta con qué posición juega.
+async function entrarACancha(V, jugadorId, indice, cerrar) {
+  let posicion = null;
+  if (!V.est.actual.slots.includes(jugadorId)) {
+    posicion = await preguntarPosicion(V, jugadorId);
+    if (!posicion) return; // canceló: la ventana de la casilla sigue abierta para elegir a otra
+  }
+  V.aplicar((e, c) => colocarEnPosicion(e, c, jugadorId, indice, { posicion }));
+  cerrar();
 }
 
 function abrirCupoLibero(V, clave) {
@@ -115,7 +175,7 @@ function abrirCambio(V, saleId, { entraPreelegido = null } = {}) {
   const pintar = (cerrar) => {
     rellenar(cuerpo, 
       h('button', { class: 'check-grande', 'aria-pressed': String(excepcional), onclick: () => { excepcional = !excepcional; pintar(cerrar); } }, h('span', { class: 'caja' }, excepcional ? icono('ok', { tam: 18, grueso: 3 }) : null), 'Cambio excepcional (lesión)'),
-      entran.map((j) => opcionJugador(V, j.id, { nota: d.salieronExcepcionalIds.has(j.id) ? 'Salió por excepción' : '', principal: j.id === entraPreelegido, onclick: () => { if (V.aplicar((e, c) => ejecutarSustitucion(e, c, saleId, j.id, { excepcional }))) cerrar(); } }))
+      entran.map((j) => opcionJugador(V, j.id, { nota: d.salieronExcepcionalIds.has(j.id) ? 'Salió por excepción' : '', principal: j.id === entraPreelegido, onclick: async () => { const posicion = await preguntarPosicion(V, j.id, { texto: `Entra ${d.nombre(j.id)} por ${d.nombre(saleId)}.` }); if (!posicion) return; if (V.aplicar((e, c) => ejecutarSustitucion(e, c, saleId, j.id, { excepcional, posicion }))) cerrar(); } }))
     );
   };
   abrirVentana({ titulo: `Sale ${d.nombre(saleId)}`, subtitulo: `¿Quién entra? · cambios ${d.sustitucionesUsadas}/${MAX_SUSTITUCIONES}`, contenido: (cerrar) => { pintar(cerrar); return cuerpo; } });
@@ -216,7 +276,7 @@ function controlesArmado(V) {
   return h(
     'div',
     { class: 'controles-cancha' },
-    h('p', { class: 'nota' }, faltan > 0 ? `Toca una casilla o una jugadora de la banca. Faltan ${faltan} en cancha.` : d.plantillaCompleta ? 'Todo listo. Confirma la plantilla para empezar.' : 'Falta elegir al líbero.'),
+    h('p', { class: 'nota' }, faltan > 0 ? `Toca una casilla o una jugadora, o arrástrala hasta su posición. Faltan ${faltan} en cancha.` : d.plantillaCompleta ? 'Todo listo. Confirma la plantilla para empezar.' : 'Falta elegir al líbero.'),
     h('button', { class: 'btn btn-primario btn-grande btn-ancho', disabled: V.bloqueado, onclick: () => confirmar_(V) }, icono('ok'), ' Confirmar plantilla')
   );
 }
@@ -235,9 +295,14 @@ function cupoLibero(V, clave) {
     botones.push(enCancha ? h('button', { class: 'btn', disabled: V.bloqueado, onclick: () => V.aplicar((e, c) => salirLibero(e, c, id)) }, 'Salir') : h('button', { class: 'btn btn-primario', disabled: V.bloqueado, onclick: () => abrirEntrarLibero(V, id) }, 'Entrar'));
     botones.push(h('button', { class: 'btn btn-fantasma', disabled: V.bloqueado, onclick: () => abrirNuevoLibero(V, id) }, 'No puede seguir'));
   }
+  const arrastrable = id != null && !V.bloqueado && (!act.plantillaConfirmada || !enCancha);
   return h(
     'div',
-    { class: `cupo lib-${clave}` },
+    {
+      class: `cupo lib-${clave} ${arrastrable ? 'arrastrable' : ''}`,
+      'data-destino': act.plantillaConfirmada ? null : `libero-${clave}`,
+      onpointerdown: arrastrable ? (e) => iniciarArrastre(e, { jugadorId: id }, d.nombre(id), (p, destino) => soltarEn(V, p, destino)) : null,
+    },
     id != null ? circuloJugador(V, id, { etiquetaLibero: false }) : circuloVacio('?'),
     h('div', { class: 'quien' }, h('strong', {}, INFO_LIBERO[clave].nombre), h('span', {}, id != null ? `${d.nombre(id)}${act.plantillaConfirmada ? (enCancha ? ' · en cancha' : ' · en banca') : ''}` : 'Sin elegir')),
     h('div', { class: 'botones' }, botones)
@@ -252,8 +317,8 @@ function bancaLista(V) {
   const lista = V.jugadores.filter((j) => !filtroCategoria || j.categoria === filtroCategoria);
   return h(
     'div',
-    {},
-    h('div', { class: 'titulo-grupo' }, act.plantillaConfirmada ? 'Banca (toca para hacer un cambio)' : 'Jugadoras (toca para ponerla en cancha)'),
+    { class: 'banca', 'data-destino': act.plantillaConfirmada ? null : 'banca' },
+    h('div', { class: 'titulo-grupo' }, act.plantillaConfirmada ? 'Banca (toca, o arrastra desde ⋮⋮ hasta quien sale)' : 'Jugadoras (toca, o arrastra desde ⋮⋮ hasta la cancha)'),
     categorias.length > 1
       ? h('div', { class: 'chips-categoria' }, [null, ...categorias].map((c) => h('button', { class: `chip ${filtroCategoria === c ? 'activo' : ''}`, 'aria-pressed': String(filtroCategoria === c), onclick: () => { filtroCategoria = c; app.renderizar(); } }, c ?? 'Todas')))
       : null,
@@ -267,18 +332,38 @@ function bancaLista(V) {
       else if (esLib) nota = INFO_LIBERO[d.tipoLiberoPorId.get(j.id)].nombre;
       else if (fuera) nota = 'Fuera por el líbero';
       else if (inhab) nota = 'No puede volver (era líbero)';
+      // Armando: cualquiera que pueda jugar se arrastra (también quien ya está en cancha, para cambiarla de lugar).
+      // En juego: solo quien está en la banca y puede entrar.
+      const puedeArrastrar = !V.bloqueado && !inhab && (act.plantillaConfirmada ? !enCancha && !esLib && !fuera : true);
       return h(
-        'button',
-        {
-          class: `fila-jugador ${enCancha || esLib ? 'en-cancha' : ''}`,
-          disabled: V.bloqueado || esLib || fuera || inhab,
-          onclick: () => {
-            if (!act.plantillaConfirmada) V.aplicar((e, c) => toggleJugador(e, c, j.id));
-            else if (!enCancha) abrirQuienSale(V, j.id);
+        'div',
+        { class: 'fila-envoltura' },
+        h(
+          'button',
+          {
+            class: `fila-jugador ${enCancha || esLib ? 'en-cancha' : ''}`,
+            disabled: V.bloqueado || esLib || fuera || inhab,
+            onclick: async () => {
+              if (act.plantillaConfirmada) {
+                if (!enCancha) abrirQuienSale(V, j.id);
+                return;
+              }
+              // Armando: si entra a la cancha se pregunta con qué posición juega; si ya estaba, un toque la saca.
+              // Con la cancha llena no se pregunta: el motor avisa que no caben más.
+              let posicion = null;
+              if (!enCancha && act.slots.includes(null)) {
+                posicion = await preguntarPosicion(V, j.id);
+                if (!posicion) return;
+              }
+              V.aplicar((e, c) => toggleJugador(e, c, j.id, { posicion }));
+            },
           },
-        },
-        circuloJugador(V, j.id, { etiquetaLibero: false }),
-        h('span', { class: 'datos' }, h('strong', {}, h('span', { class: 'nom' }, j.nombre), insigniaDisponibilidad(j.id)), h('small', {}, [subtituloJugador(j), nota].filter(Boolean).join(' · ')))
+          circuloJugador(V, j.id, { etiquetaLibero: false }),
+          h('span', { class: 'datos' }, h('strong', {}, h('span', { class: 'nom' }, j.nombre), insigniaDisponibilidad(j.id)), h('small', {}, [subtituloJugador(j, enCancha ? d.posicionDe(j.id) : null), nota].filter(Boolean).join(' · ')))
+        ),
+        puedeArrastrar
+          ? h('button', { class: 'asa-arrastre arrastrable', 'aria-label': `Arrastrar a ${j.nombre}`, title: act.plantillaConfirmada ? 'Arrastra hasta la casilla de quien sale' : 'Arrastra hasta una posición de la cancha', onpointerdown: (e) => iniciarArrastre(e, { jugadorId: j.id }, j.nombre, (p, destino) => soltarEn(V, p, destino)) }, icono('asa', { tam: 24, grueso: 2 }))
+          : null
       );
     })
   );
@@ -292,7 +377,7 @@ function abrirQuienSale(V, entraId) {
   const pintar = (cerrar) =>
     rellenar(cuerpo, 
       h('button', { class: 'check-grande', 'aria-pressed': String(excepcional), onclick: () => { excepcional = !excepcional; pintar(cerrar); } }, h('span', { class: 'caja' }, excepcional ? icono('ok', { tam: 18, grueso: 3 }) : null), 'Cambio excepcional (lesión)'),
-      sale.map((id) => opcionJugador(V, id, { nota: `P${est.actual.slots.indexOf(id) + 1}`, onclick: () => { if (V.aplicar((e, c) => ejecutarSustitucion(e, c, id, entraId, { excepcional }))) cerrar(); } }))
+      sale.map((id) => opcionJugador(V, id, { nota: `P${est.actual.slots.indexOf(id) + 1}`, onclick: async () => { const posicion = await preguntarPosicion(V, entraId, { texto: `Entra ${d.nombre(entraId)} por ${d.nombre(id)}.` }); if (!posicion) return; if (V.aplicar((e, c) => ejecutarSustitucion(e, c, id, entraId, { excepcional, posicion }))) cerrar(); } }))
     );
   abrirVentana({ titulo: `Entra ${d.nombre(entraId)}`, subtitulo: `¿Por quién? · cambios ${d.sustitucionesUsadas}/${MAX_SUSTITUCIONES}`, contenido: (cerrar) => { pintar(cerrar); return cuerpo; } });
 }

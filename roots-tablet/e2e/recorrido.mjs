@@ -10,6 +10,8 @@ const url = `http://127.0.0.1:${puerto}/`;
 const navegador = await chromium.launch();
 const ctx = await navegador.newContext({ viewport: { width: 960, height: 600 }, hasTouch: true, acceptDownloads: true });
 const page = await ctx.newPage();
+// Estos recorridos no prueban el detalle de los puntos del rival (lo cubre e2e/puntoRival.mjs): se apaga para que no abra la ventana.
+await page.addInitScript(() => localStorage.setItem('roots-detalle-rival', JSON.stringify({ activo: false })));
 const errores = [];
 page.on('pageerror', (e) => { console.log('PAGEERR', e.message); errores.push('pageerror: ' + e.message); });
 page.on('console', (m) => m.type() === 'error' && errores.push('console: ' + m.text()));
@@ -64,7 +66,11 @@ await foto('05-plantilla-vacia');
 
 // Armar 6 en cancha
 const filas = page.locator('.fila-jugador');
-for (let i = 0; i < 6; i++) await filas.nth(i).click();
+// Cada jugadora que entra a la cancha pregunta con qué posición juega: se acepta la sugerida (la de su ficha).
+for (let i = 0; i < 6; i++) {
+  await filas.nth(i).click();
+  await page.click('[data-pregunta-posicion] .opcion.principal');
+}
 await page.click('text=Un líbero');
 await page.click('.cupo button');
 await page.waitForSelector('.ventana .opcion');
